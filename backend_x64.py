@@ -4,7 +4,7 @@ import platform
 import struct
 
 # ============================================================
-# OPCODES  (muss exakt zu compiler.py passen)
+# OPCODES
 # ============================================================
 
 OP_LOADI   = 0x01
