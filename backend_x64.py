@@ -1,146 +1,204 @@
-# backend_x64.py
-# ============================================================
-# Mantis 6 Backend — x86-64, Full Production, AVX2, Typed ISA
-# ============================================================
-
+from __future__ import annotations
 import ctypes
+import platform
 import struct
 
-# ------------------------
-# Opcodes
-# ------------------------
-OP_NOP    = 0x00
-OP_CONST  = 0x01
-OP_MOV    = 0x02
-OP_ADD    = 0x10
-OP_SUB    = 0x11
-OP_MUL    = 0x12
-OP_DIV    = 0x13
-OP_RET    = 0x30
-OP_PRINT  = 0x40
-OP_READLN = 0x41
-OP_VADD   = 0x60
-OP_VSUB   = 0x61
-OP_VMUL   = 0x62
-OP_VDIV   = 0x63
-OP_LOAD   = 0x50
-OP_STORE  = 0x51
+# ============================================================
+# OPCODES  (muss exakt zu compiler.py passen)
+# ============================================================
 
-FLAG_SIMD = 0x80
+OP_LOADI   = 0x01
+OP_ADD     = 0x02
+OP_SUB     = 0x03
+OP_MUL     = 0x04
+OP_DIV     = 0x05
+OP_RET     = 0x06
+OP_PRINT   = 0x20
+OP_READLN  = 0x21
 
-# Type tags
-TYPE_I64    = 0x01
-TYPE_F64    = 0x02
-TYPE_BOOL   = 0x03
-TYPE_VEC256 = 0x04
-TYPE_STRING = 0x05
+# ============================================================
+# REX / MODRM ENCODING
+# ============================================================
 
-InstrStruct = struct.Struct("<BBBBBBI")  # opcode,dst,src1,src2,type_tag,flags,imm
+def _rex(w: int, r: int, x: int, b: int) -> bytes:
+    return bytes([0x40 | (w << 3) | (r << 2) | (x << 1) | b])
 
-# ------------------------
-# Register Allocation
-# ------------------------
-# General purpose: rax, rbx, rcx, rdx, rsi, rdi, r8-r15
-GP_REGS = [f"r{i}" for i in range(16)]
-VECTOR_REGS = [f"ymm{i}" for i in range(16)]  # AVX2
 
-# ------------------------
-# Backend Emitter
-# ------------------------
-class X64Emitter:
-    def __init__(self):
-        self.code = bytearray()
-        self.labels = {}
-        self.jumps = []
+def _modrm(mod: int, reg: int, rm: int) -> bytes:
+    return bytes([(mod << 6) | ((reg & 7) << 3) | (rm & 7)])
 
-    def emit_bytes(self, b: bytes):
-        self.code += b
 
-    def emit_instr(self, opcode, dst=0, src1=0, src2=0, type_tag=TYPE_I64, flags=0, imm=0):
-        # encode bytecode into internal list for processing
-        self.code += InstrStruct.pack(opcode,dst,src1,src2,type_tag,flags,imm)
+def _encode_rr(op: bytes, dst: int, src: int) -> bytes:
+    """
+    dst = rm field
+    src = reg field
+    """
+    return (
+        _rex(1, (src >> 3) & 1, 0, (dst >> 3) & 1)
+        + op
+        + _modrm(3, src, dst)
+    )
 
-    def finalize(self):
-        return bytes(self.code)
 
-# ------------------------
-# Native Compilation
-# ------------------------
+def _mov_imm64(reg: int, imm: int) -> bytes:
+    return (
+        _rex(1, 0, 0, (reg >> 3) & 1)
+        + bytes([0xB8 + (reg & 7)])
+        + struct.pack("<Q", imm & 0xFFFFFFFFFFFFFFFF)
+    )
+
+
+# ============================================================
+# SYSTEM / LIBC
+# ============================================================
+
+_system = platform.system()
+
+if _system == "Windows":
+    libc = ctypes.CDLL("msvcrt.dll")
+else:
+    libc = ctypes.CDLL(None)
+
+printf_addr = ctypes.cast(libc.printf, ctypes.c_void_p).value
+scanf_addr  = ctypes.cast(libc.scanf,  ctypes.c_void_p).value
+
+PRINTF_FMT = ctypes.create_string_buffer(b"%lld\n")
+SCANF_FMT  = ctypes.create_string_buffer(b"%lld")
+
+printf_fmt_addr = ctypes.addressof(PRINTF_FMT)
+scanf_fmt_addr  = ctypes.addressof(SCANF_FMT)
+
+# ============================================================
+# CALL HELPERS (ABI-KORREKT)
+# ============================================================
+
+def _call_abs(addr: int) -> bytes:
+    # mov rax, addr ; call rax
+    return _mov_imm64(0, addr) + b"\xFF\xD0"
+
+
+def _setup_printf(val_reg: int) -> bytes:
+    if _system == "Windows":
+        # rcx, rdx
+        return (
+            _mov_imm64(1, printf_fmt_addr) +
+            _encode_rr(b"\x89", 2, val_reg)
+        )
+    else:
+        # rdi, rsi
+        return (
+            _mov_imm64(7, printf_fmt_addr) +
+            _encode_rr(b"\x89", 6, val_reg)
+        )
+
+
+def _setup_scanf() -> tuple[bytes, ctypes.Array, int]:
+    buf = ctypes.create_string_buffer(8)
+    addr = ctypes.addressof(buf)
+
+    if _system == "Windows":
+        setup = (
+            _mov_imm64(1, scanf_fmt_addr) +
+            _mov_imm64(2, addr)
+        )
+    else:
+        setup = (
+            _mov_imm64(7, scanf_fmt_addr) +
+            _mov_imm64(6, addr)
+        )
+
+    return setup, buf, addr
+
+
+# ============================================================
+# MAIN EMITTER
+# ============================================================
+
 def emit_x64(bytecode: bytes) -> bytes:
-    """
-    Converts Mantis 6 bytecode to x86-64 native machine code
-    with full Typed ISA, AVX2 SIMD, I/O support, and real register allocation.
-    """
-    emitter = bytearray()
+    code = bytearray()
 
-    i = 0
-    while i < len(bytecode):
-        opcode,dst,src1,src2,type_tag,flags,imm = struct.unpack("<BBBBBBI", bytecode[i:i+8])
-        i += 8
+    # --------------------------------------------------------
+    # PROLOG  (STACK ALIGNMENT + SHADOW SPACE)
+    # --------------------------------------------------------
 
-        # --------------------
-        # Arithmetic Integer
-        # --------------------
-        if opcode == OP_ADD and type_tag == TYPE_I64:
-            # add rax, rbx example (for now dst=r0, src1=r1)
-            emitter += b"\x48\x01\xd8"  # add rax, rbx
-        elif opcode == OP_SUB and type_tag == TYPE_I64:
-            emitter += b"\x48\x29\xd8"  # sub rax, rbx
-        elif opcode == OP_MUL and type_tag == TYPE_I64:
-            emitter += b"\x48\xf7\xe3"  # imul rbx
-        elif opcode == OP_DIV and type_tag == TYPE_I64:
-            # x86 idiv requires dividend in rax, divisor in rbx
-            # check div by zero
-            emitter += b"\x48\x85\xdb"  # test rbx, rbx
-            emitter += b"\x74\x05"      # je skip_div
-            emitter += b"\x48\x99"      # cqo
-            emitter += b"\x48\xf7\xfb"  # idiv rbx
-            emitter += b"\xeb\x00"      # skip_div placeholder
+    code += b"\x55"              # push rbp
+    code += b"\x48\x89\xE5"      # mov rbp, rsp
 
-        # --------------------
-        # Floating point
-        # --------------------
-        elif opcode == OP_ADD and type_tag == TYPE_F64:
-            emitter += b"\xf2\x0f\x58\xc1"  # addsd xmm0,xmm1
-        elif opcode == OP_SUB and type_tag == TYPE_F64:
-            emitter += b"\xf2\x0f\x5c\xc1"  # subsd xmm0,xmm1
-        elif opcode == OP_MUL and type_tag == TYPE_F64:
-            emitter += b"\xf2\x0f\x59\xc1"  # mulsd xmm0,xmm1
-        elif opcode == OP_DIV and type_tag == TYPE_F64:
-            emitter += b"\xf2\x0f\x5e\xc1"  # divsd xmm0,xmm1
+    if _system == "Windows":
+        code += b"\x48\x83\xEC\x28"  # sub rsp, 40
+    else:
+        code += b"\x48\x83\xEC\x08"  # sub rsp, 8
 
-        # --------------------
-        # Vector SIMD (AVX2)
-        # --------------------
-        elif flags & FLAG_SIMD:
-            if opcode == OP_VADD:
-                emitter += b"\xc5\xf8\x58\xc1"  # vaddps ymm0, ymm0, ymm1
-            elif opcode == OP_VSUB:
-                emitter += b"\xc5\xf8\x5c\xc1"  # vsubps ymm0, ymm0, ymm1
-            elif opcode == OP_VMUL:
-                emitter += b"\xc5\xf8\x59\xc1"  # vmulps ymm0, ymm0, ymm1
-            elif opcode == OP_VDIV:
-                emitter += b"\xc5\xf8\x5e\xc1"  # vdivps ymm0, ymm0, ymm1
+    # --------------------------------------------------------
+    # BYTECODE LOOP
+    # --------------------------------------------------------
 
-        # --------------------
-        # I/O
-        # --------------------
-        elif opcode == OP_PRINT:
-            # call printf
-            emitter += b"\xe8\x00\x00\x00\x00"  # placeholder call rel32
-        elif opcode == OP_READLN:
-            emitter += b"\xe8\x00\x00\x00\x00"  # placeholder call rel32
+    pc = 0
+    size = len(bytecode)
 
-        # --------------------
-        # Return
-        # --------------------
-        elif opcode == OP_RET:
-            emitter += b"\xc3"
+    while pc < size:
+        op  = bytecode[pc]
+        dst = bytecode[pc+1]
+        s1  = bytecode[pc+2]
+        s2  = bytecode[pc+3]
+        imm = struct.unpack_from("<i", bytecode, pc+4)[0]
+        pc += 8
 
-        # --------------------
-        # Fallback nop
-        # --------------------
+        # ---------------- LOADI ----------------
+        if op == OP_LOADI:
+            code += _mov_imm64(dst, imm)
+
+        # ---------------- ADD ------------------
+        elif op == OP_ADD:
+            code += _encode_rr(b"\x01", dst, s1)
+
+        # ---------------- SUB ------------------
+        elif op == OP_SUB:
+            code += _encode_rr(b"\x29", dst, s1)
+
+        # ---------------- MUL ------------------
+        elif op == OP_MUL:
+            code += _encode_rr(b"\x0F\xAF", dst, s1)
+
+        # ---------------- DIV (RDX SAFE) -------
+        elif op == OP_DIV:
+            code += b"\x52"                      # push rdx
+            code += _encode_rr(b"\x89", 0, dst)  # mov rax, dst
+            code += b"\x48\x99"                  # cqo
+
+            rex = _rex(1, 0, 0, (s1 >> 3) & 1)
+            modrm = _modrm(3, 7, s1)
+            code += rex + b"\xF7" + modrm        # idiv r/m64
+
+            code += _encode_rr(b"\x89", dst, 0)  # dst = rax
+            code += b"\x5A"                      # pop rdx
+
+        # ---------------- PRINT ----------------
+        elif op == OP_PRINT:
+            code += _setup_printf(dst)
+            code += _call_abs(printf_addr)
+
+        # ---------------- READLN ---------------
+        elif op == OP_READLN:
+            setup, buf, addr = _setup_scanf()
+            code += setup
+            code += _call_abs(scanf_addr)
+            code += _mov_imm64(dst, addr)
+            code += _encode_rr(b"\x8B", dst, dst)
+
+        # ---------------- RET ------------------
+        elif op == OP_RET:
+            code += _encode_rr(b"\x89", 0, dst)  # rax = dst
+
+            if _system == "Windows":
+                code += b"\x48\x83\xC4\x28"      # add rsp, 40
+            else:
+                code += b"\x48\x83\xC4\x08"      # add rsp, 8
+
+            code += b"\x5D"  # pop rbp
+            code += b"\xC3"  # ret
+
         else:
-            emitter += b"\x90"
+            raise RuntimeError(f"Unknown opcode {op}")
 
-    return bytes(emitter)
+    return bytes(code)
