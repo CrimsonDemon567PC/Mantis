@@ -63,4 +63,7 @@ To compile and immediately execute a file natively: python cli.py run path/to/so
 To measure compilation and execution performance: python cli.py bench path/to/source.mt --iter 1000
 
 ### D. BUNDLING 
-Mantis supports .mtnb files, which are production-ready bundles containing multiple modules and assets in a zero-copy format.
+Mantis supports .mtnb files, which are production-ready bundles containing multiple modules and assets in a zero-copy format. Binaries can be executed on arm64, x86-64, Wondows, Unix, etc. (loader and backends required)
+
+## Packages
+Download or upload packages here: [Mantis Package Index](https://mantispi.page.gd)
