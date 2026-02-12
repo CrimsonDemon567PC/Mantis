@@ -67,3 +67,4 @@ Mantis supports .mtnb files, which are production-ready bundles containing multi
 
 ## Packages
 Download or upload packages here: [Mantis Package Index](https://mantispi.page.gd)
+Note: you download a bin file, but actually, it is a zip/mt file, just rename it
