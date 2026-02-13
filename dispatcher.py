@@ -1,147 +1,162 @@
-# dispatcher.py
 # ============================================================
-# Mantis Builtin Dispatcher — drop-in, no core changes needed
+# Mantis 7 Dispatcher — Builtins, String Runtime, Type Handling
 # ============================================================
 
-import ctypes
-import struct
-import loader
+import os
 import platform
+import struct
+
+# The loader will call set_string_blob() before execution.
+STRING_BLOB = b""
+
+def set_string_blob(blob: bytes):
+    """
+    Called by the loader to provide the string blob extracted
+    from the .mtn or .mtnb bytecode.
+    """
+    global STRING_BLOB
+    STRING_BLOB = blob
+
+
+# ============================================================
+# iOS Sandbox Detection
+# ============================================================
 
 def _is_ios_sandbox() -> bool:
+    """
+    Detect whether we are running inside an iOS sandbox
+    (e.g. a-Shell on iPad/iPhone).
+    Native write(1, ...) does not display output there.
+    """
     m = platform.machine().lower()
     return m.startswith("ipad") or m.startswith("iphone") or m.startswith("ipod")
 
-# ------------------------------------------------------------
-# Builtin registry
-# ------------------------------------------------------------
+IOS_SANDBOX = _is_ios_sandbox()
 
 
-BUILTINS = {}
+# ============================================================
+# Type Markers (Compiler uses these classes)
+# ============================================================
 
-def _builtin_concat(a_ptr, b_ptr):
-    a = _load_string(a_ptr)
-    b = _load_string(b_ptr)
-    s = (a + b).encode("utf-8") + b"\x00"
-    off = len(STRING_BLOB)
-    STRING_BLOB.extend(s)
+class I64: pass
+class F64: pass
+class Bool: pass
+class Str: pass
+
+
+# ============================================================
+# String Runtime
+# ============================================================
+
+def _load_string(ptr: int) -> str:
+    """
+    Load a null-terminated UTF-8 string from the global blob.
+    """
+    blob = STRING_BLOB
+    end = blob.find(b"\x00", ptr)
+    return blob[ptr:end].decode("utf-8")
+
+
+# Runtime-created strings (concat, to_string)
+RUNTIME_STRING_BLOB = bytearray()
+
+def _intern_runtime_string(text: str) -> int:
+    """
+    Store a new UTF-8 string in the runtime string blob.
+    Returns the pointer (offset).
+    """
+    data = text.encode("utf-8") + b"\x00"
+    off = len(RUNTIME_STRING_BLOB)
+    RUNTIME_STRING_BLOB.extend(data)
     return off
 
-def _builtin_to_string(val, type):
-    if type is I64:
-        return _intern_runtime_string(str(val))
-    if type is F64:
-        return _intern_runtime_string(str(val))
-    if type is Bool:
-        return _intern_runtime_string("true" if val else "false")
-    raise TypeError("Cannot convert to string")
 
+# ============================================================
+# Builtin: print
+# ============================================================
 
-def builtin_print(args):
-    # args = list of Python ints (string pointers)
-    # We need to resolve string pointers from the MTN string blob.
-    if not hasattr(loader, "_current_string_blob"):
-        print("[mantis:print] <no string blob>")
-        return 0
+def _builtin_print(args, types):
+    """
+    Print values with correct type formatting.
+    Uses native write(1, ...) except on iOS sandbox.
+    """
+    out_parts = []
 
-    blob = loader._current_string_blob
-    out = []
+    for val, t in zip(args, types):
+        if t is Str:
+            out_parts.append(_load_string(val))
+        elif t is F64:
+            f = struct.unpack("<d", struct.pack("<Q", val))[0]
+            out_parts.append(str(f))
+        elif t is Bool:
+            out_parts.append("true" if val else "false")
+        else:
+            out_parts.append(str(val))
 
-    for ptr in args:
-        if ptr < 0 or ptr >= len(blob):
-            out.append(f"<bad_ptr:{ptr}>")
-            continue
+    s = " ".join(out_parts)
 
-        # read until null terminator
-        s = []
-        i = ptr
-        while i < len(blob) and blob[i] != 0:
-            s.append(chr(blob[i]))
-            i += 1
+    if IOS_SANDBOX:
+        print(s)
+    else:
+        os.write(1, s.encode("utf-8") + b"\n")
 
-        out.append("".join(s))
-
-    print(*out)
     return 0
 
-BUILTINS[-1] = builtin_print
 
+# ============================================================
+# Builtin: concat (string + string)
+# ============================================================
 
-# ------------------------------------------------------------
-# Patch loader._execute to intercept builtin calls
-# ------------------------------------------------------------
-
-_original_execute = loader._execute
-
-def _execute_patched(native):
+def _builtin_concat(a_ptr: int, b_ptr: int) -> int:
     """
-    Intercepts builtin calls encoded in the native buffer.
-    We detect a builtin trampoline marker and call Python instead.
+    Concatenate two strings and return a new pointer.
     """
-
-    # Builtin trampoline convention:
-    # If native == b"BUILTIN\x00" + struct.pack("<i", id)
-    # then we call BUILTINS[id]
-    if native.startswith(b"BUILTIN\x00"):
-        bid = struct.unpack("<i", native[8:12])[0]
-        fn = BUILTINS.get(bid)
-        if fn is None:
-            raise RuntimeError(f"Unknown builtin id {bid}")
-        return fn([])
-
-    return _original_execute(native)
-
-loader._execute = _execute_patched
+    a = _load_string(a_ptr)
+    b = _load_string(b_ptr)
+    return _intern_runtime_string(a + b)
 
 
-# ------------------------------------------------------------
-# Patch loader._translate to emit builtin trampolines
-# ------------------------------------------------------------
+# ============================================================
+# Builtin: to_string (convert any value to string)
+# ============================================================
 
-_original_translate = loader._translate
-
-def _translate_patched(bytecode):
+def _builtin_to_string(val, t) -> int:
     """
-    If the bytecode contains OP_CALL -1, we replace the native code
-    with a builtin trampoline instead of real machine code.
+    Convert a typed value to a string and return pointer.
     """
+    if t is Str:
+        return val
 
-    # Extract string blob for print()
-    # Format: [magic][fn_count][...functions...][blob_size][blob]
-    data = bytecode.tobytes()
-    magic = data[:4]
-    if magic == b"MTN1":
-        # find string blob
-        # skip functions
-        pos = 4
-        fn_count = struct.unpack_from("<I", data, pos)[0]
-        pos += 4
+    if t is Bool:
+        return _intern_runtime_string("true" if val else "false")
 
-        for _ in range(fn_count):
-            clen = struct.unpack_from("<I", data, pos)[0]
-            pos += 4 + clen * 13
+    if t is F64:
+        f = struct.unpack("<d", struct.pack("<Q", val))[0]
+        return _intern_runtime_string(str(f))
 
-        blob_size = struct.unpack_from("<I", data, pos)[0]
-        pos += 4
-        loader._current_string_blob = data[pos:pos+blob_size]
+    # Default: I64
+    return _intern_runtime_string(str(val))
 
-    # detect builtin call
-    # naive v1: if any OP_CALL has a == -1, treat whole function as builtin
-    pos = 4
-    fn_count = struct.unpack_from("<I", data, pos)[0]
-    pos += 4
 
-    for _ in range(fn_count):
-        clen = struct.unpack_from("<I", data, pos)[0]
-        pos += 4
-        for i in range(clen):
-            op, a, b, c = struct.unpack_from("<Biii", data, pos)
-            pos += 13
-            if op == 8 and a == -1:  # OP_CALL, builtin
-                # return trampoline
-                return b"BUILTIN\x00" + struct.pack("<i", -1)
+# ============================================================
+# Builtin Dispatch Table
+# ============================================================
 
-    # fallback to real native translation
-    return _original_translate(bytecode)
+def dispatch_builtin(fn_id: int, args, arg_types):
+    """
+    Called by the native backend when a builtin is invoked.
+    fn_id:
+        -1 = print
+        -2 = concat
+        -3 = to_string
+    """
+    if fn_id == -1:
+        return _builtin_print(args, arg_types)
 
-loader._translate = _translate_patched
+    if fn_id == -2:
+        return _builtin_concat(args[0], args[1])
+
+    if fn_id == -3:
+        return _builtin_to_string(args[0], arg_types[0])
+
+    raise RuntimeError(f"Unknown builtin ID: {fn_id}")
