@@ -258,10 +258,10 @@ def emit_x64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
-            # compare rax with 0
-            out += _cmp(0, 0)
+            out += _test_rax_rax()
             fixups.append((len(out) + 2, a))
             out += _jz_rel32()
+
 
         # ---------- CALL ----------
         elif op == OP_CALL:
