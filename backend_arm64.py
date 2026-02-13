@@ -46,9 +46,9 @@ def _mov_imm64_x0(value: int) -> bytes:
     hi16  = (value >> 32) & 0xFFFF
 
     ins = []
-    ins.append(0xD2800000 | (lo16 << 5))          # movz x0, lo16
-    ins.append(0xF2A00000 | (mid16 << 5))        # movk x0, mid16, lsl #16
-    ins.append(0xF2C00000 | (hi16 << 5))         # movk x0, hi16, lsl #32
+    ins.append(0xD2800000 | (lo16 << 5))   # movz x0, lo16
+    ins.append(0xF2A00000 | (mid16 << 5)) # movk x0, mid16, lsl #16
+    ins.append(0xF2C00000 | (hi16 << 5))  # movk x0, hi16, lsl #32
     return b"".join(_u32(i) for i in ins)
 
 
@@ -57,9 +57,8 @@ def _load_stack(offset: int) -> bytes:
     ldr x0, [x29, #offset]
     x29 is the frame pointer (fp).
     """
-    # offset must be a multiple of 8 and within encodable range
     imm = offset // 8
-    return _u32(0xF9400000 | (imm << 10) | 29 << 5 | 0)  # ldr x0, [x29, #imm*8]
+    return _u32(0xF9400000 | (imm << 10) | 29 << 5 | 0)
 
 
 def _store_stack(offset: int) -> bytes:
@@ -67,7 +66,7 @@ def _store_stack(offset: int) -> bytes:
     str x0, [x29, #offset]
     """
     imm = offset // 8
-    return _u32(0xF9000000 | (imm << 10) | 29 << 5 | 0)  # str x0, [x29, #imm*8]
+    return _u32(0xF9000000 | (imm << 10) | 29 << 5 | 0)
 
 
 def _add_x0_x0_x1() -> bytes:
@@ -107,7 +106,7 @@ def _b_cond(op: int) -> bytes:
     Conditional branch with placeholder imm19.
     op is the condition code in the low 4 bits.
     """
-    return _u32(0x54000000 | (op & 0xF))  # imm19 patched later
+    return _u32(0x54000000 | (op & 0xF))
 
 
 def _b_uncond() -> bytes:
@@ -156,7 +155,7 @@ ABI_REGS = [0, 1, 2, 3, 4, 5]
 # MAIN EMITTER
 # ============================================================
 
-def emit_arm64(bytecode: bytes) -> bytes:
+def emit_arm64(bytecode: bytes, rt_offsets: dict[str, int]) -> bytes:
     """
     Translate a single-function MTN bytecode buffer into AArch64
     machine code.
@@ -166,6 +165,10 @@ def emit_arm64(bytecode: bytes) -> bytes:
       - x1 is the secondary value register
       - stack slots are addressed via x29-relative offsets
       - floats are not yet handled in v1 (F64 opcodes still map to raw bits)
+
+    rt_offsets are offsets (in bytes) of runtime functions
+    relative to the start of the runtime blob that will be
+    appended directly after this code.
     """
 
     # ---------- parse MTN header ----------
@@ -194,8 +197,9 @@ def emit_arm64(bytecode: bytes) -> bytes:
     out += _sub_sp_imm(32)  # fixed local space for v1
 
     labels: list[int] = []
-    fixups_branch: list[tuple[int, int]] = []  # (pos, target_index)
-    last_was_float = False  # reserved for future F64 support
+    fixups_branch: list[tuple[int, int]] = []      # (pos, target_index) for intra-code branches/calls
+    builtin_fixups: list[tuple[int, int]] = []     # (pos, rt_offset) for runtime BL calls
+    last_was_float = False
 
     for i, (op, a, b, c) in enumerate(instrs):
         labels.append(len(out))
@@ -206,7 +210,6 @@ def emit_arm64(bytecode: bytes) -> bytes:
             last_was_float = False
 
         elif op == OP_CONST_F64:
-            # v1: treat as raw bits in x0
             out += _mov_imm64_x0(a)
             last_was_float = True
 
@@ -265,22 +268,31 @@ def emit_arm64(bytecode: bytes) -> bytes:
             argc = b
 
             # Move arguments into ABI registers (x0, x1, x2, ...)
-            # v1: arguments are evaluated into x0 sequentially; here we only
-            # mirror the last value into x0..xN in a trivial way.
             for i_arg in range(argc):
                 reg = ABI_REGS[i_arg]
                 if reg != 0:
-                    # mov xN, x0
                     out += _u32(0xAA0003E0 | (reg << 5))  # mov xN, x0
 
             if a < 0:
-                # Builtin calls are handled outside this backend.
-                # a == -1: print(...)
-                # a == -2: concat(a, b)
-                # a == -3: to_string(x)
+                # Builtin calls mapped to runtime blob.
+                if a == -2:
+                    rt_off = rt_offsets["concat"]
+                elif a == -3:
+                    rt_off = rt_offsets["format_i64"]
+                elif a == -1:
+                    # print builtin not mapped natively in v1
+                    rt_off = None
+                else:
+                    raise RuntimeError(f"Unknown builtin call {a}")
+
+                if rt_off is not None:
+                    pos = len(out)
+                    out += _bl()
+                    builtin_fixups.append((pos, rt_off))
+
                 last_was_float = False
             else:
-                # Normal function calls (not used in v1, but structurally supported)
+                # Normal function calls (by instruction index).
                 fixups_branch.append((len(out), a))
                 out += _bl()
                 last_was_float = False
@@ -294,11 +306,12 @@ def emit_arm64(bytecode: bytes) -> bytes:
         else:
             raise RuntimeError(f"Unsupported opcode {op}")
 
-    # ---------- resolve branches and calls ----------
+    code_size = len(out)
+
+    # ---------- resolve intra-code branches and calls ----------
     for pos, target in fixups_branch:
         src = pos
         dst = labels[target]
-        # imm19 for B/CBZ: (dst - src) >> 2
         ins = struct.unpack_from("<I", out, pos)[0]
         if (ins & 0x7C000000) == 0x14000000:
             # B or BL: imm26
@@ -310,9 +323,17 @@ def emit_arm64(bytecode: bytes) -> bytes:
             ins = (ins & 0xFF00001F) | ((imm19 & 0x7FFFF) << 5)
         out[pos:pos+4] = _u32(ins)
 
+    # ---------- resolve builtin BL calls into runtime blob ----------
+    for pos, rt_off in builtin_fixups:
+        src = pos
+        dst = code_size + rt_off
+        imm26 = (dst - src) >> 2
+        ins = 0x94000000 | (imm26 & 0x03FFFFFF)
+        out[pos:pos+4] = _u32(ins)
+
     # Safety epilogue in case of fallthrough
     out += _add_sp_imm(32)
     out += _ldp_fp_lr_post()
-    out += _u32(0xD65F03C0)  # ret
+    out += _u32(0xD65F03C0)
 
     return bytes(out)
