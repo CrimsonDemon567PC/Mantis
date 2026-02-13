@@ -250,14 +250,14 @@ def _translate(bytecode: memoryview) -> bytes:
     code_bytes = bytecode.tobytes()
 
     if ARCH == "x64":
-        native = emit_x64(code_bytes)
-        runtime = StringRuntimeX64().build()
-        return native + runtime
+        runtime_blob, rt_offsets = StringRuntimeX64().build()
+        native = emit_x64(code_bytes, rt_offsets)
+        return native + runtime_blob
 
     if ARCH == "arm64":
-        native = emit_arm64(code_bytes)
-        runtime = StringRuntimeARM64().build()
-        return native + runtime
+        runtime_blob, rt_offsets = StringRuntimeARM64().build()
+        native = emit_arm64(code_bytes, rt_offsets)
+        return native + runtime_blob
 
     raise RuntimeError("No backend for architecture")
 
@@ -303,7 +303,7 @@ def run(path: str) -> int:
         # Extract string blob from raw bytecode
         blob = _extract_string_blob(memoryview(bytecode))
 
-        # Provide blob to dispatcher
+        # Provide blob to dispatcher (still used by higher-level facilities)
         import dispatcher
         dispatcher.set_string_blob(blob)
 
