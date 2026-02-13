@@ -1,118 +1,92 @@
 # cli.py
 # ============================================================
-# Mantis 6 — High-Performance CLI
+# Mantis 7 — Clean, Loader-Synced CLI
 # ============================================================
 
 from __future__ import annotations
 
 import argparse
-import os
-import struct
-import sys
 import time
 from pathlib import Path
 
 import compiler as mantis_compiler
 import loader as mantis_loader
 
-# ============================================================
-# CONSTANTS
-# ============================================================
-
-MAGIC_MTNB = b"MTNB"
-MTNB_HEADER = struct.Struct("<4sHHII")  # magic, version, reserved, module_count, asset_count
-ENTRY_STRUCT = struct.Struct("<IIII")   # name_offset, name_len, data_offset, data_len
 
 # ============================================================
-# UTIL
-# ============================================================
-
-def _read(path: Path) -> bytes:
-    with open(path, "rb") as f:
-        return f.read()
-
-
-def _write(path: Path, data: bytes):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "wb") as f:
-        f.write(data)
-
-
-# ============================================================
-# BUILD — SINGLE FILE
+# BUILD — SINGLE FILE (.mt → .mtn)
 # ============================================================
 
 def build_file(src: Path) -> Path:
     if src.suffix != ".mt":
         raise RuntimeError("build expects .mt file")
 
-    code = src.read_text(encoding="utf-8")
+    code = src.read_text("utf-8")
     bytecode = mantis_compiler.compile_source(code)
 
     out = src.with_suffix(".mtn")
-    _write(out, bytecode)
-
+    out.write_bytes(bytecode)
     return out
 
 
 # ============================================================
-# BUILD — PROJECT → FLAT MTNB
+# BUILD — PROJECT (.mt → .mtnb)
 # ============================================================
 
 def build_project(folder: Path) -> Path:
-    modules: list[tuple[bytes, bytes]] = []
-    assets: list[tuple[bytes, bytes]] = []
+    modules: list[tuple[str, bytes]] = []
+    assets: list[tuple[str, bytes]] = []
 
-    # ---------- scan ----------
     for path in folder.rglob("*"):
         if path.suffix == ".mt":
             bc = mantis_compiler.compile_source(path.read_text("utf-8"))
-            name = path.with_suffix(".mtn").name.encode()
+            name = path.with_suffix(".mtn").name
             modules.append((name, bc))
         elif path.is_file():
-            assets.append((path.name.encode(), _read(path)))
+            assets.append((path.name, path.read_bytes()))
 
-    module_count = len(modules)
-    asset_count  = len(assets)
-
-    # ---------- header ----------
+    # Build MTNB bundle
     out = bytearray()
-    out += MTNB_HEADER.pack(MAGIC_MTNB, 1, 0, module_count, asset_count)
 
+    # Header: magic, version, reserved, module_count, asset_count
+    out += b"MTNB"
+    out += (1).to_bytes(2, "little")   # version
+    out += (0).to_bytes(2, "little")   # reserved
+    out += len(modules).to_bytes(4, "little")
+    out += len(assets).to_bytes(4, "little")
+
+    # Reserve table
+    entry_size = 16
     table_offset = len(out)
+    out += b"\x00" * entry_size * (len(modules) + len(assets))
 
-    # reserve tables for modules + assets
-    out += b"\x00" * ENTRY_STRUCT.size * (module_count + asset_count)
-
-    # ---------- payload ----------
     name_offsets = []
     data_offsets = []
 
-    # names
+    # Names
     for name, _ in modules + assets:
         name_offsets.append(len(out))
-        out += name
+        out += name.encode()
 
-    # data
+    # Data
     for _, data in modules + assets:
         data_offsets.append(len(out))
         out += data
 
-    # ---------- fill tables ----------
+    # Fill table
     cursor = table_offset
     for i, (name, data) in enumerate(modules + assets):
-        entry = ENTRY_STRUCT.pack(
-            name_offsets[i],
-            len(name),
-            data_offsets[i],
-            len(data),
+        entry = (
+            name_offsets[i].to_bytes(4, "little") +
+            len(name).to_bytes(4, "little") +
+            data_offsets[i].to_bytes(4, "little") +
+            len(data).to_bytes(4, "little")
         )
-        out[cursor:cursor + ENTRY_STRUCT.size] = entry
-        cursor += ENTRY_STRUCT.size
+        out[cursor:cursor+entry_size] = entry
+        cursor += entry_size
 
     bundle_path = folder.with_suffix(".mtnb")
-    _write(bundle_path, bytes(out))
-
+    bundle_path.write_bytes(out)
     return bundle_path
 
 
@@ -145,56 +119,31 @@ def bench_file(src: Path, iterations: int = 1000):
 
 
 # ============================================================
-# CLI PARSER
+# CLI
 # ============================================================
-
-def _cmd_build(args):
-    p = Path(args.path)
-
-    if p.is_dir():
-        out = build_project(p)
-    else:
-        out = build_file(p)
-
-    print("Built:", out)
-
-
-def _cmd_run(args):
-    result = run_path(Path(args.path))
-    print(result)
-
-
-def _cmd_bench(args):
-    bench_file(Path(args.path), args.iter)
-
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="mantis", add_help=True)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # build
     p_build = sub.add_parser("build")
     p_build.add_argument("path")
-    p_build.set_defaults(func=_cmd_build)
+    p_build.set_defaults(func=lambda a: print("Built:", build_file(Path(a.path))
+                                             if Path(a.path).is_file()
+                                             else build_project(Path(a.path))))
 
-    # run
     p_run = sub.add_parser("run")
     p_run.add_argument("path")
-    p_run.set_defaults(func=_cmd_run)
+    p_run.set_defaults(func=lambda a: print(run_path(Path(a.path))))
 
-    # bench
     p_bench = sub.add_parser("bench")
     p_bench.add_argument("path")
     p_bench.add_argument("--iter", type=int, default=1000)
-    p_bench.set_defaults(func=_cmd_bench)
+    p_bench.set_defaults(func=lambda a: bench_file(Path(a.path), a.iter))
 
     args = parser.parse_args(argv)
     args.func(args)
 
-
-# ============================================================
-# ENTRY
-# ============================================================
 
 if __name__ == "__main__":
     main()
