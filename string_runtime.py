@@ -63,6 +63,8 @@ class StringRuntimeX64(_RuntimeBase):
 
         # ====================================================
         # __mantis_strlen
+        #   rdi = s
+        #   rax = len
         # ====================================================
         mark("__mantis_strlen")
         out += b"\x48\x89\xF8"          # mov rax, rdi
@@ -77,6 +79,8 @@ class StringRuntimeX64(_RuntimeBase):
 
         # ====================================================
         # __mantis_memcpy
+        #   rdi = dst, rsi = src, rdx = n
+        #   rax = dst
         # ====================================================
         mark("__mantis_memcpy")
         out += b"\x48\x89\xF8"          # mov rax, rdi
@@ -94,6 +98,8 @@ class StringRuntimeX64(_RuntimeBase):
 
         # ====================================================
         # __mantis_string_concat
+        #   rdi = a, rsi = b
+        #   rax = result
         # ====================================================
         mark("__mantis_string_concat")
 
@@ -220,11 +226,7 @@ class StringRuntimeARM64(_RuntimeBase):
         def mark(name: str):
             labels[name] = len(out)
 
-        def jrel(op: int, target: str):
-            """
-            Insert a 32‑bit branch instruction with placeholder offset.
-            op = base opcode (B, B.cond, BL)
-            """
+        def br(op: int, target: str):
             pos = len(out)
             out.extend(struct.pack("<I", op))
             fixups.append((pos, target, op))
@@ -237,23 +239,23 @@ class StringRuntimeARM64(_RuntimeBase):
         mark("__mantis_strlen")
 
         # mov x1, x0
-        out += self._u32(0xAA0003E1)  # mov x1, x0
+        out += struct.pack("<I", 0xAA0003E1)
 
         mark("strlen_loop")
         # ldrb w2, [x1]
-        out += self._u32(0x39400022)
+        out += struct.pack("<I", 0x39400022)
         # cbz w2, done
-        jrel(0x34000000, "strlen_done")
+        br(0x34000000, "strlen_done")
         # add x1, x1, #1
-        out += self._u32(0x91000421)
+        out += struct.pack("<I", 0x91000421)
         # b loop
-        jrel(0x14000000, "strlen_loop")
+        br(0x14000000, "strlen_loop")
 
         mark("strlen_done")
         # sub x0, x1, x0
-        out += self._u32(0xCB000020)
+        out += struct.pack("<I", 0xCB000020)
         # ret
-        out += self._u32(0xD65F03C0)
+        out += struct.pack("<I", 0xD65F03C0)
 
         # ====================================================
         # __mantis_memcpy
@@ -263,24 +265,24 @@ class StringRuntimeARM64(_RuntimeBase):
         mark("__mantis_memcpy")
 
         # cbz x2, done
-        jrel(0xB4000000, "memcpy_done")
+        br(0xB4000000, "memcpy_done")
 
         mark("memcpy_loop")
         # ldrb w3, [x1]
-        out += self._u32(0x39400023)
+        out += struct.pack("<I", 0x39400023)
         # strb w3, [x0]
-        out += self._u32(0x39000003)
+        out += struct.pack("<I", 0x39000003)
         # add x1, x1, #1
-        out += self._u32(0x91000421)
+        out += struct.pack("<I", 0x91000421)
         # add x0, x0, #1
-        out += self._u32(0x91000400)
+        out += struct.pack("<I", 0x91000400)
         # sub x2, x2, #1
-        out += self._u32(0xD1000442)
+        out += struct.pack("<I", 0xD1000442)
         # cbnz x2, loop
-        jrel(0x35000000, "memcpy_loop")
+        br(0x35000000, "memcpy_loop")
 
         mark("memcpy_done")
-        out += self._u32(0xD65F03C0)  # ret
+        out += struct.pack("<I", 0xD65F03C0)  # ret
 
         # ====================================================
         # __mantis_string_concat
@@ -290,78 +292,78 @@ class StringRuntimeARM64(_RuntimeBase):
         # ====================================================
         mark("__mantis_string_concat")
 
-        # Save registers: x19,x20,x21,x22
-        out += self._u32(0xA9BF4FF3)  # stp x19,x20,[sp,#-16]!
-        out += self._u32(0xA9BF57F5)  # stp x21,x22,[sp,#-16]!
+        # Save x19,x20,x21,x22
+        out += struct.pack("<I", 0xA9BF4FF3)  # stp x19,x20,[sp,#-16]!
+        out += struct.pack("<I", 0xA9BF57F5)  # stp x21,x22,[sp,#-16]!
 
         # Save a,b
-        out += self._u32(0xAA0003F3)  # mov x19, x0 (a)
-        out += self._u32(0xAA0103F4)  # mov x20, x1 (b)
+        out += struct.pack("<I", 0xAA0003F3)  # mov x19, x0
+        out += struct.pack("<I", 0xAA0103F4)  # mov x20, x1
 
         # len_a = strlen(a)
-        out += self._u32(0xAA1303E0)  # mov x0, x19
-        jrel(0x94000000, "__mantis_strlen")
-        out += self._u32(0xAA0003F5)  # mov x21, x0
+        out += struct.pack("<I", 0xAA1303E0)  # mov x0, x19
+        br(0x94000000, "__mantis_strlen")
+        out += struct.pack("<I", 0xAA0003F5)  # mov x21, x0
 
         # len_b = strlen(b)
-        out += self._u32(0xAA1403E0)  # mov x0, x20
-        jrel(0x94000000, "__mantis_strlen")
-        out += self._u32(0xAA0003F6)  # mov x22, x0
+        out += struct.pack("<I", 0xAA1403E0)  # mov x0, x20
+        br(0x94000000, "__mantis_strlen")
+        out += struct.pack("<I", 0xAA0003F6)  # mov x22, x0
 
         # total = len_a + len_b
-        out += self._u32(0x8B1602B5)  # add x21, x21, x22
+        out += struct.pack("<I", 0x8B1602B5)  # add x21, x21, x22
 
         # x2 = total + 1
-        out += self._u32(0xAA1503E2)  # mov x2, x21
-        out += self._u32(0x91000442)  # add x2, x2, #1
+        out += struct.pack("<I", 0xAA1503E2)  # mov x2, x21
+        out += struct.pack("<I", 0x91000442)  # add x2, x2, #1
 
-        # Load heap_ptr (RIP‑relative)
+        # Load heap_ptr via literal load
         mark("heap_ptr_adr")
-        out += self._u32(0x58000080)  # ldr x0, #imm19 (patched later)
+        out += struct.pack("<I", 0x58000080)  # ldr x0, #imm19 (patch later)
         heap_ptr_patch = len(out) - 4
 
         # ldr x1, [x0]
-        out += self._u32(0xF9400001)
+        out += struct.pack("<I", 0xF9400001)
         # cbnz x1, heap_inited
-        jrel(0x35000000, "heap_inited")
+        br(0x35000000, "heap_inited")
 
         # init heap_ptr = x0 + 8
-        out += self._u32(0x91002001)  # add x1, x0, #8
-        out += self._u32(0xF9000001)  # str x1, [x0]
+        out += struct.pack("<I", 0x91002001)  # add x1, x0, #8
+        out += struct.pack("<I", 0xF9000001)  # str x1, [x0]
 
         mark("heap_inited")
 
         # x3 = result = x1
-        out += self._u32(0xAA0103E3)
+        out += struct.pack("<I", 0xAA0103E3)
 
         # bump: x1 += x2
-        out += self._u32(0x8B020021)
+        out += struct.pack("<I", 0x8B020021)
         # store new heap_ptr
-        out += self._u32(0xF9000001)
+        out += struct.pack("<I", 0xF9000001)
 
         # return ptr in x0
-        out += self._u32(0xAA0303E0)
+        out += struct.pack("<I", 0xAA0303E0)
 
         # memcpy(result, a, len_a)
-        out += self._u32(0xAA0303E0)  # mov x0, x3
-        out += self._u32(0xAA1303E1)  # mov x1, x19
-        out += self._u32(0xAA1503E2)  # mov x2, x21
-        jrel(0x94000000, "__mantis_memcpy")
+        out += struct.pack("<I", 0xAA0303E0)  # mov x0, x3
+        out += struct.pack("<I", 0xAA1303E1)  # mov x1, x19
+        out += struct.pack("<I", 0xAA1503E2)  # mov x2, x21
+        br(0x94000000, "__mantis_memcpy")
 
         # memcpy(result + len_a, b, len_b)
-        out += self._u32(0x8B150060)  # add x0, x3, x21
-        out += self._u32(0xAA1403E1)  # mov x1, x20
-        out += self._u32(0xAA1603E2)  # mov x2, x22
-        jrel(0x94000000, "__mantis_memcpy")
+        out += struct.pack("<I", 0x8B150060)  # add x0, x3, x21
+        out += struct.pack("<I", 0xAA1403E1)  # mov x1, x20
+        out += struct.pack("<I", 0xAA1603E2)  # mov x2, x22
+        br(0x94000000, "__mantis_memcpy")
 
         # null‑terminate
-        out += self._u32(0x3900001F)  # strb wzr, [x0]
+        out += struct.pack("<I", 0x3900001F)  # strb wzr, [x0]
 
-        # restore registers
-        out += self._u32(0xA8C157F5)  # ldp x21,x22,[sp],#16
-        out += self._u32(0xA8C14FF3)  # ldp x19,x20,[sp],#16
+        # restore x19,x20,x21,x22
+        out += struct.pack("<I", 0xA8C157F5)  # ldp x21,x22,[sp],#16
+        out += struct.pack("<I", 0xA8C14FF3)  # ldp x19,x20,[sp],#16
 
-        out += self._u32(0xD65F03C0)  # ret
+        out += struct.pack("<I", 0xD65F03C0)  # ret
 
         # ====================================================
         # Append heap_ptr + heap
@@ -377,12 +379,15 @@ class StringRuntimeARM64(_RuntimeBase):
             src = pos
             dst = labels[target]
             rel = (dst - src) >> 2
-            out[pos:pos+4] = struct.pack("<I", (op & 0xFC000000) | (rel & 0x03FFFFFF))
+            out[pos:pos+4] = struct.pack(
+                "<I", (op & 0xFC000000) | (rel & 0x03FFFFFF)
+            )
 
-        # Patch heap_ptr ADR (ldr literal)
-        # ldr x0, #imm19 → imm19 = (heap_ptr_offset - PC) >> 2
+        # Patch heap_ptr literal load (ldr x0, #imm19)
         pc = heap_ptr_patch
         imm19 = (heap_ptr_offset - pc) >> 2
-        out[heap_ptr_patch:heap_ptr_patch+4] = struct.pack("<I", 0x58000000 | ((imm19 & 0x7FFFF) << 5) | 0)
+        out[heap_ptr_patch:heap_ptr_patch+4] = struct.pack(
+            "<I", 0x58000000 | ((imm19 & 0x7FFFF) << 5)
+        )
 
         return bytes(out)
