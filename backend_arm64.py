@@ -1,32 +1,31 @@
 # ============================================================
-# Mantis 7 — Native ARM64 Backend (FINAL, no placeholders)
-# AAPCS64 ABI, real branching, real calls, loader-ready
+# Mantis 7 — Native ARM64 Backend
+# Single-function MTN → AArch64 machine code (AAPCS64)
 # ============================================================
 
 from __future__ import annotations
 import struct
 
-
 # ================= OPCODES (shared ISA) =================
 
-OP_CONST_I64   = 1
-OP_CONST_F64   = 2
-OP_ADD         = 3
-OP_SUB         = 4
-OP_MUL         = 5
-OP_DIV         = 6
-OP_RETURN      = 7
-OP_CALL        = 8
-OP_LOAD        = 9
-OP_STORE       = 10
-OP_ALLOC_STACK = 11
-OP_FIELD_LOAD  = 12
-OP_FIELD_STORE = 13
-OP_JMP         = 14
-OP_JMP_IF_FALSE= 15
-OP_CMP_EQ      = 16
-OP_CMP_LT      = 17
-OP_CMP_GT      = 18
+OP_CONST_I64    = 1
+OP_CONST_F64    = 2
+OP_ADD          = 3
+OP_SUB          = 4
+OP_MUL          = 5
+OP_DIV          = 6
+OP_RETURN       = 7
+OP_CALL         = 8
+OP_LOAD         = 9
+OP_STORE        = 10
+OP_ALLOC_STACK  = 11
+OP_FIELD_LOAD   = 12
+OP_FIELD_STORE  = 13
+OP_JMP          = 14
+OP_JMP_IF_FALSE = 15
+OP_CMP_EQ       = 16
+OP_CMP_LT       = 17
+OP_CMP_GT       = 18
 
 
 # ============================================================
@@ -46,6 +45,9 @@ def _movk(rd: int, imm16: int, shift: int):
 
 
 def _mov_imm64(rd: int, val: int) -> bytes:
+    """
+    Build a 64-bit immediate in rd using MOVZ/MOVK.
+    """
     parts = []
     for i in range(4):
         imm = (val >> (i * 16)) & 0xFFFF
@@ -73,18 +75,32 @@ def _sdiv(rd, rn, rm):
 
 
 def _cmp(rn, rm):
+    """
+    cmp rn, rm  (alias: subs xzr, rn, rm)
+    """
     return _u32(0xEB00001F | (rm << 16) | (rn << 5))
 
 
 def _cset(rd, cond):
+    """
+    cset rd, cond
+    """
     return _u32(0x9A9F07E0 | (cond << 12) | rd)
 
 
 def _ldr_stack(rt, offset):
+    """
+    ldr rt, [fp, #offset]
+    fp = x29
+    """
     return _u32(0xF9400000 | ((offset // 8) << 10) | (29 << 5) | rt)
 
 
 def _str_stack(rt, offset):
+    """
+    str rt, [fp, #offset]
+    fp = x29
+    """
     return _u32(0xF9000000 | ((offset // 8) << 10) | (29 << 5) | rt)
 
 
@@ -93,34 +109,58 @@ def _ret():
 
 
 def _b(offset):
+    """
+    Unconditional branch (rel32 >> 2)
+    """
     return _u32(0x14000000 | ((offset >> 2) & 0x03FFFFFF))
 
 
 def _b_cond(offset, cond):
-    return _u32(0x54000000 | ((offset >> 2) << 5) | cond)
+    """
+    Conditional branch with condition code.
+    """
+    return _u32(0x54000000 | (((offset >> 2) & 0x7FFFF) << 5) | cond)
 
 
 def _bl(offset):
+    """
+    Branch with link.
+    """
     return _u32(0x94000000 | ((offset >> 2) & 0x03FFFFFF))
 
 
 def _stp_fp_lr():
+    """
+    stp x29, x30, [sp, #-16]!
+    """
     return _u32(0xA9BF7BFD)
 
 
 def _ldp_fp_lr():
+    """
+    ldp x29, x30, [sp], #16
+    """
     return _u32(0xA8C17BFD)
 
 
 def _mov_fp_sp():
+    """
+    mov x29, sp
+    """
     return _u32(0x910003FD)
 
 
 def _sub_sp(size):
+    """
+    sub sp, sp, #size
+    """
     return _u32(0xD10003FF | ((size & 0xFFF) << 10))
 
 
 def _add_sp(size):
+    """
+    add sp, sp, #size
+    """
     return _u32(0x910003FF | ((size & 0xFFF) << 10))
 
 
@@ -137,8 +177,12 @@ ABI_REGS = list(range(8))
 # ============================================================
 
 def emit_arm64(bytecode: bytes) -> bytes:
+    """
+    Translate a single-function MTN bytecode buffer into AArch64
+    machine code using AAPCS64 calling convention.
+    """
 
-    # ---------- parse MTN ----------
+    # ---------- parse MTN header ----------
     if bytecode[:4] != b"MTN1":
         raise RuntimeError("Invalid MTN")
 
@@ -146,6 +190,7 @@ def emit_arm64(bytecode: bytes) -> bytes:
     fn_count = struct.unpack_from("<I", bytecode, pos)[0]
     pos += 4
 
+    # v1: only first function is used
     code_len = struct.unpack_from("<I", bytecode, pos)[0]
     pos += 4
 
@@ -164,10 +209,10 @@ def emit_arm64(bytecode: bytes) -> bytes:
     # ---------- prologue ----------
     out += _stp_fp_lr()
     out += _mov_fp_sp()
-    out += _sub_sp(32)  # 16-byte aligned locals
+    out += _sub_sp(32)  # fixed local space (v1)
 
-    labels = []
-    fixups = []
+    labels = []   # byte offset of each instruction
+    fixups = []   # (patch_pos, target_index, kind)
 
     for i, (op, a, b, c) in enumerate(instrs):
 
@@ -225,9 +270,9 @@ def emit_arm64(bytecode: bytes) -> bytes:
         elif op == OP_CALL:
             argc = b
 
-            # move args to x0-x7
-            for i in range(argc):
-                out += _mov_imm64(ABI_REGS[i], 0)
+            # v1: move arguments into x0-x7 in a trivial way
+            for i_arg in range(argc):
+                out += _mov_imm64(ABI_REGS[i_arg], 0)
 
             fixups.append((len(out), a, "bl"))
             out += _bl(0)
@@ -241,19 +286,19 @@ def emit_arm64(bytecode: bytes) -> bytes:
         else:
             raise RuntimeError(f"Unsupported opcode {op}")
 
-    # ---------- resolve branches ----------
-    for pos_fix, target, typ in fixups:
+    # ---------- resolve branches & calls ----------
+    for pos_fix, target, kind in fixups:
         dst = labels[target]
         rel = dst - pos_fix
 
-        if typ == "b":
-            out[pos_fix:pos_fix+4] = _b(rel)
-        elif typ == "bz":
-            out[pos_fix:pos_fix+4] = _b_cond(rel, 0x0)
-        elif typ == "bl":
-            out[pos_fix:pos_fix+4] = _bl(rel)
+        if kind == "b":
+            out[pos_fix:pos_fix + 4] = _b(rel)
+        elif kind == "bz":
+            out[pos_fix:pos_fix + 4] = _b_cond(rel, 0x0)
+        elif kind == "bl":
+            out[pos_fix:pos_fix + 4] = _bl(rel)
 
-    # ---------- safety return ----------
+    # ---------- safety epilogue ----------
     out += _add_sp(32)
     out += _ldp_fp_lr()
     out += _ret()
