@@ -33,7 +33,11 @@ OP_CMP_GT       = 18
 # ============================================================
 
 def _test_rax_rax():
+    """
+    test rax, rax
+    """
     return b"\x48\x85\xC0"
+
 
 def _rex(w=1, r=0, x=0, b=0):
     return bytes([0x40 | (w << 3) | (r << 2) | (x << 1) | b])
@@ -214,6 +218,11 @@ def emit_x64(bytecode: bytes) -> bytes:
         if op == OP_CONST_I64:
             out += _mov_imm64(0, a)
 
+        elif op == OP_CONST_F64:
+            # v1: treat F64 constant as raw 64-bit payload in rax
+            # (no separate FP pipeline yet)
+            out += _mov_imm64(0, a)
+
         # ---------- LOAD / STORE ----------
         elif op == OP_LOAD:
             out += _load_stack(a)
@@ -258,10 +267,10 @@ def emit_x64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
+            # branch if rax == 0
             out += _test_rax_rax()
             fixups.append((len(out) + 2, a))
             out += _jz_rel32()
-
 
         # ---------- CALL ----------
         elif op == OP_CALL:
