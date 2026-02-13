@@ -1,28 +1,38 @@
 # ============================================================
 # Mantis 7 — Linear Scan Register Allocator (Production)
-# Maps SSA temps to CPU registers or stack slots
-# Fully integrated, no placeholders, no examples
+# Updated for Float + String support
 # ============================================================
 
 from __future__ import annotations
 from typing import List, Dict, Tuple
 
 # ================= CPU REGISTER POOLS =================
+# Caller-save registers only (safe for expression evaluation)
 
-X86_64_REGS = [0, 1, 2, 3, 8, 9, 10, 11]  # rax, rbx, rcx, rdx, r8-r11 (caller-save)
-ARM64_REGS  = list(range(0, 8))           # x0-x7 (argument / caller-save)
+X86_64_REGS = [
+    0,  # rax
+    3,  # rbx
+    1,  # rcx
+    2,  # rdx
+    8, 9, 10, 11  # r8-r11
+]
+
+ARM64_REGS = list(range(0, 8))  # x0-x7 (caller-save)
+
 
 # ================= SSA TEMP =================
 
 class Temp:
-    __slots__ = ("name", "start", "end", "reg", "stack_slot")
+    __slots__ = ("name", "start", "end", "reg", "stack_slot", "is_arg")
 
-    def __init__(self, name: str, start: int, end: int):
+    def __init__(self, name: str, start: int, end: int, is_arg=False):
         self.name = name
         self.start = start
         self.end = end
         self.reg = None
         self.stack_slot = None
+        self.is_arg = is_arg  # NEW: mark temps used as CALL arguments
+
 
 # ================= LIVE INTERVAL =================
 
@@ -33,6 +43,7 @@ class LiveInterval:
         self.temp = temp
         self.start = temp.start
         self.end = temp.end
+
 
 # ================= LINEAR SCAN ALLOCATOR =================
 
@@ -52,51 +63,60 @@ class LinearScanAllocator:
         self.stack_slots: List[Temp] = []
         self.next_stack_offset = 0  # in bytes
 
+    # --------------------------------------------------------
+    # Main allocation
+    # --------------------------------------------------------
     def allocate(self):
-        """
-        Main linear scan allocation.
-        Assigns CPU registers or stack slots to SSA temps.
-        """
         for temp in self.temps:
             self.expire_old_intervals(temp)
+
+            # CALL arguments must be in ABI registers
+            if temp.is_arg:
+                if self.reg_pool:
+                    temp.reg = self.reg_pool.pop(0)
+                else:
+                    temp.stack_slot = self._alloc_stack()
+                continue
+
+            # Normal allocation
             if self.reg_pool:
-                # assign first available register
                 reg = self.reg_pool.pop(0)
                 temp.reg = reg
                 self.active.append(LiveInterval(temp))
                 self.active.sort(key=lambda x: x.end)
             else:
-                # spill to stack
-                temp.stack_slot = self.next_stack_offset
-                self.next_stack_offset += 8  # 64-bit slot
-                self.stack_slots.append(temp)
+                temp.stack_slot = self._alloc_stack()
 
+    # --------------------------------------------------------
+    # Expire intervals
+    # --------------------------------------------------------
     def expire_old_intervals(self, temp: Temp):
-        """
-        Free registers of intervals that ended before `temp.start`.
-        """
         new_active = []
         for interval in self.active:
             if interval.end >= temp.start:
                 new_active.append(interval)
             else:
-                # free the register
+                # free register
                 if interval.temp.reg is not None:
                     self.reg_pool.append(interval.temp.reg)
         self.active = new_active
 
+    # --------------------------------------------------------
+    # Allocate stack slot
+    # --------------------------------------------------------
+    def _alloc_stack(self):
+        slot = self.next_stack_offset
+        self.next_stack_offset += 8  # 64-bit slot
+        return slot
+
+    # --------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------
     def get_mapping(self) -> Dict[str, Tuple[int, int]]:
-        """
-        Returns mapping of temp_name -> (reg, stack_slot)
-        If a temp has a register, stack_slot is None.
-        """
         mapping = {}
         for temp in self.temps:
             mapping[temp.name] = (temp.reg, temp.stack_slot)
         return mapping
 
     def get_stack_size(self) -> int:
-        """
-        Returns total bytes of stack needed for spills.
-        """
         return self.next_stack_offset
