@@ -334,14 +334,38 @@ def visit_Assign(self, node: ast.Assign):
 # ------------------------------------------------------------
 
 def visit_Call(self, node: ast.Call):
-    # builtin: print()
+    """
+    Unified call handler:
+    - builtin print(...)
+    - method calls: obj.method(...)
+    - normal function calls
+    """
+
+    # ----------------------------------------
+    # BUILTIN: print(...)
+    # ----------------------------------------
     if isinstance(node.func, ast.Name) and node.func.id == "print":
         for arg in node.args:
             self.visit(arg)
         self.current.emit(OP_CALL, -1, len(node.args))  # builtin print id = -1
         return I64()
 
-    # normal function
+    # ----------------------------------------
+    # METHOD CALL: obj.method(...)
+    # ----------------------------------------
+    if isinstance(node.func, ast.Attribute):
+        obj_type = self.visit(node.func.value)
+
+        # push self
+        # (obj already visited)
+        for arg in node.args:
+            self.visit(arg)
+
+        return self._emit_method_call(obj_type, node.func.attr, len(node.args) + 1)
+
+    # ----------------------------------------
+    # NORMAL FUNCTION CALL
+    # ----------------------------------------
     if isinstance(node.func, ast.Name):
         fn: FuncSymbol = self.globals.resolve(node.func.id)
 
@@ -651,23 +675,6 @@ def _emit_method_call(self, obj_type: StructType, name: str, argc: int):
     return fn.ret
 
 
-def visit_Call(self, node: ast.Call):
-    """
-    Extended call handler with method dispatch.
-    """
-
-    # method call: obj.method(...)
-    if isinstance(node.func, ast.Attribute):
-        obj_type = self.visit(node.func.value)
-
-        # push self already done
-        for arg in node.args:
-            self.visit(arg)
-
-        return self._emit_method_call(obj_type, node.func.attr, len(node.args) + 1)
-
-    # fallback to Part-2 implementation
-    return super().visit_Call(node)
 
 
 # ------------------------------------------------------------
@@ -749,3 +756,24 @@ def _emit_bytecode(self) -> bytes:
     out += blob
 
     return bytes(out)
+
+# Bind extended visitors to Compiler
+Compiler.visit_Assign = visit_Assign
+Compiler.visit_Call = visit_Call
+Compiler.visit_If = visit_If
+Compiler.visit_While = visit_While
+Compiler.visit_Compare = visit_Compare
+Compiler.visit_ClassDef = visit_ClassDef
+Compiler._compile_method = _compile_method
+Compiler.visit_Attribute = visit_Attribute
+Compiler.visit_List = visit_List
+Compiler.visit_Constant_str = visit_Constant_str
+Compiler._intern_string = _intern_string
+Compiler.visit_Constant = visit_Constant
+Compiler.visit_AnnAssign = visit_AnnAssign
+Compiler.visit_For = visit_For
+Compiler._infer_return = _infer_return
+Compiler._emit_method_call = _emit_method_call
+Compiler.visit_BinOp = visit_BinOp
+Compiler._strip_dead_code = _strip_dead_code
+Compiler._emit_bytecode = _emit_bytecode
