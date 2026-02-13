@@ -176,7 +176,7 @@ ABI_REGS = [7, 6, 2, 1, 8, 9]
 # MAIN EMITTER
 # ============================================================
 
-def emit_x64(bytecode: bytes) -> bytes:
+def emit_x64(bytecode: bytes, rt_offsets: dict[str, int]) -> bytes:
     """
     Translate a single-function MTN bytecode buffer into x86-64
     machine code.
@@ -186,6 +186,10 @@ def emit_x64(bytecode: bytes) -> bytes:
       - rbx is the secondary value register
       - stack slots are addressed via rbp-relative offsets
       - floats use xmm0/xmm1 internally, result mirrored back to rax
+
+    rt_offsets are offsets (in bytes) of runtime functions
+    relative to the start of the runtime blob that will be
+    appended directly after this code.
     """
 
     # ---------- parse MTN header ----------
@@ -206,10 +210,6 @@ def emit_x64(bytecode: bytes) -> bytes:
         pos += 13
         instrs.append((op, a, b, c))
 
-    # =========================================================
-    # CODEGEN
-    # =========================================================
-
     out = bytearray()
 
     # ---------- prologue ----------
@@ -217,9 +217,10 @@ def emit_x64(bytecode: bytes) -> bytes:
     out += _mov_rbp_rsp()
     out += _sub_rsp(32)  # fixed local space for v1
 
-    labels: list[int] = []          # byte offset of each instruction
-    fixups: list[tuple[int, int]] = []  # (patch_pos, target_index)
-    last_was_float = False          # simple flag for top-of-stack type
+    labels: list[int] = []                 # byte offset of each instruction
+    fixups: list[tuple[int, int]] = []     # (patch_pos, target_index) for intra-code jumps/calls
+    builtin_fixups: list[tuple[int, int]] = []  # (patch_pos, rt_offset) for runtime calls
+    last_was_float = False
 
     for i, (op, a, b, c) in enumerate(instrs):
 
@@ -331,20 +332,34 @@ def emit_x64(bytecode: bytes) -> bytes:
         elif op == OP_CALL:
             argc = b
 
-            # Move arguments into ABI registers (rdi, rsi, rdx, ...)
+            # Move arguments into ABI registers (rdi, rsi, rdx, rcx, r8, r9).
+            # v1: arguments are evaluated sequentially into rax; here we
+            # mirror the last value into the first N argument registers.
             for i_arg in range(argc):
                 reg = ABI_REGS[i_arg]
                 out += _rr(b"\x89", reg, 0)  # mov reg, rax
 
             if a < 0:
-                # Builtin calls are handled outside this backend.
-                # a == -1: print(...)
-                # a == -2: concat(a, b)
-                # a == -3: to_string(x)
-                # Native backend does not emit direct calls for these.
+                # Builtin calls mapped to runtime blob.
+                if a == -2:
+                    rt_off = rt_offsets["concat"]
+                elif a == -3:
+                    rt_off = rt_offsets["format_i64"]
+                elif a == -1:
+                    # print builtin not mapped natively in v1
+                    rt_off = None
+                else:
+                    raise RuntimeError(f"Unknown builtin call {a}")
+
+                if rt_off is not None:
+                    # Emit placeholder call; patch later relative to runtime.
+                    patch_pos = len(out) + 1
+                    out += _call_rel32()
+                    builtin_fixups.append((patch_pos, rt_off))
+
                 last_was_float = False
             else:
-                # Normal function calls (not used in v1, but structurally supported)
+                # Normal function calls (intra-code, by instruction index).
                 fixups.append((len(out) + 1, a))
                 out += _call_rel32()
                 last_was_float = False
@@ -358,10 +373,19 @@ def emit_x64(bytecode: bytes) -> bytes:
         else:
             raise RuntimeError(f"Unsupported opcode {op}")
 
-    # ---------- resolve branches and normal calls ----------
+    code_size = len(out)
+
+    # ---------- resolve intra-code branches and calls ----------
     for pos_fix, target in fixups:
         src = pos_fix + 4
         dst = labels[target]
+        rel = dst - src
+        out[pos_fix:pos_fix + 4] = struct.pack("<i", rel)
+
+    # ---------- resolve builtin calls into runtime blob ----------
+    for pos_fix, rt_off in builtin_fixups:
+        src = pos_fix + 4
+        dst = code_size + rt_off
         rel = dst - src
         out[pos_fix:pos_fix + 4] = struct.pack("<i", rel)
 
