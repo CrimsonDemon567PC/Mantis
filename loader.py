@@ -1,6 +1,6 @@
 # loader.py
 # ============================================================
-# Mantis 6 Loader — Production Zero-Copy Native Loader
+# Mantis 7 Loader — Production Zero-Copy Native Loader
 # ABI 1.0 compliant
 # ============================================================
 
@@ -14,6 +14,41 @@ import platform
 
 from backend_x64 import emit_x64
 from backend_arm64 import emit_arm64
+
+def _extract_string_blob(bytecode: memoryview) -> bytes:
+    """
+    Extract the string blob from a raw .mtn bytecode buffer.
+    Layout:
+        [magic 4]
+        [fn_count u32]
+        per function:
+            [code_len u32]
+            repeated:
+                [op u8][a i32][b i32][c i32]
+        [string_blob_size u32]
+        [string_blob raw]
+    """
+    off = 0
+
+    # Skip magic
+    off += 4
+
+    # Read fn_count
+    fn_count = struct.unpack_from("<I", bytecode, off)[0]
+    off += 4
+
+    # Skip all function bodies
+    for _ in range(fn_count):
+        code_len = struct.unpack_from("<I", bytecode, off)[0]
+        off += 4 + code_len * 13   # each instruction = 13 bytes
+
+    # Read blob size
+    blob_size = struct.unpack_from("<I", bytecode, off)[0]
+    off += 4
+
+    # Extract blob
+    blob = bytecode[off : off + blob_size].tobytes()
+    return blob
 
 
 # ============================================================
@@ -249,13 +284,27 @@ def run(path: str) -> int:
     Execute .mtn or .mtnb
     """
 
+    # --------------------------------------------------------
+    # Raw .mtn file (single module)
+    # --------------------------------------------------------
     if path.endswith(".mtn"):
         with open(path, "rb") as f:
             bytecode = f.read()
 
+        # Extract string blob from raw bytecode
+        blob = _extract_string_blob(memoryview(bytecode))
+
+        # Provide blob to dispatcher
+        import dispatcher
+        dispatcher.set_string_blob(blob)
+
+        # Translate and execute
         native = _translate(memoryview(bytecode))
         return _execute(native)
 
+    # --------------------------------------------------------
+    # .mtnb bundle (multiple modules)
+    # --------------------------------------------------------
     if path.endswith(".mtnb"):
         mm = MMapFile(path)
         mm.open()
@@ -263,13 +312,28 @@ def run(path: str) -> int:
         bundle = Bundle(mm)
         bundle.parse()
 
+        # Load the main module
         main = bundle.find_module("main.mtn")
-        native = _translate(main.data)
+        bytecode = main.data
+
+        # Extract string blob from the module bytecode
+        blob = _extract_string_blob(bytecode)
+
+        # Provide blob to dispatcher
+        import dispatcher
+        dispatcher.set_string_blob(blob)
+
+        # Translate and execute
+        native = _translate(bytecode)
         result = _execute(native)
 
         mm.close()
         return result
 
+    # --------------------------------------------------------
+    # Unsupported file type
+    # --------------------------------------------------------
     raise RuntimeError("Unsupported file type")
+
 
 from dispatcher import *
