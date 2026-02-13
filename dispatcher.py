@@ -13,6 +13,24 @@ import loader
 
 BUILTINS = {}
 
+def _builtin_concat(a_ptr, b_ptr):
+    a = _load_string(a_ptr)
+    b = _load_string(b_ptr)
+    s = (a + b).encode("utf-8") + b"\x00"
+    off = len(STRING_BLOB)
+    STRING_BLOB.extend(s)
+    return off
+
+def _builtin_to_string(val, type):
+    if type is I64:
+        return _intern_runtime_string(str(val))
+    if type is F64:
+        return _intern_runtime_string(str(val))
+    if type is Bool:
+        return _intern_runtime_string("true" if val else "false")
+    raise TypeError("Cannot convert to string")
+
+
 def builtin_print(args):
     # args = list of Python ints (string pointers)
     # We need to resolve string pointers from the MTN string blob.
