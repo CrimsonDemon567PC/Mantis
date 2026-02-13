@@ -164,13 +164,63 @@ def _add_sp(size):
     return _u32(0x910003FF | ((size & 0xFFF) << 10))
 
 
+# -------- FP helpers (D‑registers, d0/d1) --------
+
+def _fmov_d0_x0():
+    """
+    fmov d0, x0
+    """
+    return _u32(0x9E660000)
+
+
+def _fmov_x0_d0():
+    """
+    fmov x0, d0
+    """
+    return _u32(0x9E660000 | (0 << 5) | 0)
+
+
+def _fadd_d0_d0_d1():
+    """
+    fadd d0, d0, d1
+    """
+    return _u32(0x1E602800 | (1 << 16) | (0 << 5) | 0)
+
+
+def _fsub_d0_d0_d1():
+    """
+    fsub d0, d0, d1
+    """
+    return _u32(0x1E603800 | (1 << 16) | (0 << 5) | 0)
+
+
+def _fmul_d0_d0_d1():
+    """
+    fmul d0, d0, d1
+    """
+    return _u32(0x1E600800 | (1 << 16) | (0 << 5) | 0)
+
+
+def _fdiv_d0_d0_d1():
+    """
+    fdiv d0, d0, d1
+    """
+    return _u32(0x1E601800 | (1 << 16) | (0 << 5) | 0)
+
+
+def _fcmp_d0_d1():
+    """
+    fcmp d0, d1
+    """
+    return _u32(0x1E602000 | (1 << 16) | (0 << 5))
+
+
 # ============================================================
 # ABI ARGUMENT REGISTERS (AAPCS64)
 # x0-x7
 # ============================================================
 
 ABI_REGS = list(range(8))
-
 
 # ============================================================
 # MAIN EMITTER
@@ -180,6 +230,9 @@ def emit_arm64(bytecode: bytes) -> bytes:
     """
     Translate a single-function MTN bytecode buffer into AArch64
     machine code using AAPCS64 calling convention.
+    - x0 is primary value register
+    - x1 is secondary value register
+    - d0/d1 werden für F64-Arithmetik genutzt, Ergebnis zurück in x0
     """
 
     # ---------- parse MTN header ----------
@@ -213,6 +266,7 @@ def emit_arm64(bytecode: bytes) -> bytes:
 
     labels = []   # byte offset of each instruction
     fixups = []   # (patch_pos, target_index, kind)
+    last_was_float = False  # simple type flag for top-of-stack
 
     for i, (op, a, b, c) in enumerate(instrs):
 
@@ -221,44 +275,91 @@ def emit_arm64(bytecode: bytes) -> bytes:
         # ---------- CONST ----------
         if op == OP_CONST_I64:
             out += _mov_imm64(0, a)
+            last_was_float = False
 
         elif op == OP_CONST_F64:
-            # v1: treat F64 constant as raw 64-bit payload in x0
-            # (no separate FP pipeline yet)
+            # load raw 64-bit payload into x0, mirror into d0
             out += _mov_imm64(0, a)
+            out += _fmov_d0_x0()
+            last_was_float = True
 
         # ---------- LOAD / STORE ----------
         elif op == OP_LOAD:
             out += _ldr_stack(0, a)
+            last_was_float = False  # v1: stack hält i64/pointer
 
         elif op == OP_STORE:
             out += _str_stack(0, a)
+            # Typflag bleibt unverändert
 
         # ---------- ARITH ----------
         elif op == OP_ADD:
-            out += _add(0, 0, 1)
+            if last_was_float:
+                # float: d0 = d0 + d1 (x1 → d1), Ergebnis zurück nach x0
+                out += _fmov_d0_x0()      # sicherstellen, dass d0 aus x0 kommt
+                # x1 wird vom Frontend befüllt; hier nur FP-ALU
+                out += _fadd_d0_d0_d1()
+                out += _fmov_x0_d0()
+            else:
+                out += _add(0, 0, 1)
 
         elif op == OP_SUB:
-            out += _sub(0, 0, 1)
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fsub_d0_d0_d1()
+                out += _fmov_x0_d0()
+            else:
+                out += _sub(0, 0, 1)
 
         elif op == OP_MUL:
-            out += _mul(0, 0, 1)
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fmul_d0_d0_d1()
+                out += _fmov_x0_d0()
+            else:
+                out += _mul(0, 0, 1)
 
         elif op == OP_DIV:
-            out += _sdiv(0, 0, 1)
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fdiv_d0_d0_d1()
+                out += _fmov_x0_d0()
+            else:
+                out += _sdiv(0, 0, 1)
 
         # ---------- CMP ----------
         elif op == OP_CMP_EQ:
-            out += _cmp(0, 1)
-            out += _cset(0, 0x0)  # EQ
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fcmp_d0_d1()
+                out += _cset(0, 0x0)  # EQ
+                last_was_float = False
+            else:
+                out += _cmp(0, 1)
+                out += _cset(0, 0x0)  # EQ
+                last_was_float = False
 
         elif op == OP_CMP_LT:
-            out += _cmp(0, 1)
-            out += _cset(0, 0xB)  # LT
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fcmp_d0_d1()
+                out += _cset(0, 0xB)  # LT
+                last_was_float = False
+            else:
+                out += _cmp(0, 1)
+                out += _cset(0, 0xB)  # LT
+                last_was_float = False
 
         elif op == OP_CMP_GT:
-            out += _cmp(0, 1)
-            out += _cset(0, 0xC)  # GT
+            if last_was_float:
+                out += _fmov_d0_x0()
+                out += _fcmp_d0_d1()
+                out += _cset(0, 0xC)  # GT
+                last_was_float = False
+            else:
+                out += _cmp(0, 1)
+                out += _cset(0, 0xC)  # GT
+                last_was_float = False
 
         # ---------- JMP ----------
         elif op == OP_JMP:
@@ -267,7 +368,7 @@ def emit_arm64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
-            # branch if x0 == 0 (false)
+            # branch if x0 == 0 (ints, pointers, bools; floats: nonzero bits = true)
             out += _cmp(0, 31)          # cmp x0, xzr
             fixups.append((len(out), a, "bz"))
             out += _b_cond(0, 0x0)      # b.eq
@@ -276,14 +377,14 @@ def emit_arm64(bytecode: bytes) -> bytes:
         elif op == OP_CALL:
             argc = b
 
-            # v1: move arguments into x0-x7 in a trivial way
-            # (hier nur Platzhalter, da das aktuelle IR keine
-            #  echten Multi-Register-Argumente modelliert)
+            # v1: move arguments into x0-x7 in trivial way
+            # Strings/f-strings: Werte sind i64-Pointer, Backend ist typagnostisch
             for i_arg in range(argc):
                 out += _mov_imm64(ABI_REGS[i_arg], 0)
 
             fixups.append((len(out), a, "bl"))
             out += _bl(0)
+            last_was_float = False  # Rückgabewert-Typ unbekannt
 
         # ---------- RETURN ----------
         elif op == OP_RETURN:
