@@ -764,6 +764,50 @@ def visit_BinOp(self, node: ast.BinOp):
 
     return super().visit_BinOp(node)
 
+# ============================================================
+# F-STRING SUPPORT (JoinedStr, FormattedValue)
+# ============================================================
+
+def visit_JoinedStr(self, node: ast.JoinedStr):
+    """
+    Compile an f-string by concatenating constant segments and
+    formatted expressions. Uses builtin:
+        -2 = concat
+        -3 = to_string
+    """
+
+    # Start with an empty string
+    empty_ptr = self._intern_string(b"")
+    self.current.emit(OP_CONST_I64, empty_ptr)
+    result_type = Str()
+
+    for part in node.values:
+
+        # Constant string segment
+        if isinstance(part, ast.Constant):
+            ptr = self._intern_string(part.value.encode("utf-8"))
+            self.current.emit(OP_CONST_I64, ptr)
+            self.current.emit(OP_CALL, -2, 2)  # concat
+            continue
+
+        # {expression}
+        if isinstance(part, ast.FormattedValue):
+            t = self.visit(part.value)
+            self.current.emit(OP_CALL, -3, 1)  # to_string
+            self.current.emit(OP_CALL, -2, 2)  # concat
+            continue
+
+        raise NotImplementedError(type(part))
+
+    return result_type
+
+
+def visit_FormattedValue(self, node: ast.FormattedValue):
+    """
+    Should never be called directly; JoinedStr handles it.
+    """
+    return self.visit(node.value)
+
 
 # ------------------------------------------------------------
 # DEAD CODE ELIMINATION (after return)
@@ -776,6 +820,51 @@ def _strip_dead_code(self, ctx: FunctionCtx):
         if ins.op == OP_RETURN:
             break
     ctx.code = new_code
+
+# overrite visit_Constant funktion for f-Strings
+def visit_Constant(self, node: ast.Constant):
+    """
+    Extended constant handler:
+    - int → I64
+    - float → F64
+    - str → Str (interned)
+    """
+    if isinstance(node.value, str):
+        return self.visit_Constant_str(node.value)
+
+    if isinstance(node.value, int):
+        self.current.emit(OP_CONST_I64, node.value)
+        return I64()
+
+    if isinstance(node.value, float):
+        bits = struct.unpack("<Q", struct.pack("<d", node.value))[0]
+        self.current.emit(OP_CONST_F64, bits)
+        return F64()
+
+    raise TypeError("Unsupported constant")
+
+def visit_Constant_str(self, value: str):
+    encoded = value.encode("utf-8")
+    ptr = self._intern_string(encoded)
+    self.current.emit(OP_CONST_I64, ptr)
+    return Str()
+
+def _intern_string(self, data: bytes) -> int:
+    """
+    Store a UTF-8 string in the compile-time string blob.
+    Returns the pointer (offset).
+    """
+    if not hasattr(self, "_strings"):
+        self._strings = {}
+        self._string_blob = bytearray()
+
+    if data in self._strings:
+        return self._strings[data]
+
+    off = len(self._string_blob)
+    self._string_blob += data + b"\x00"
+    self._strings[data] = off
+    return off
 
 
 # ------------------------------------------------------------
