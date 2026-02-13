@@ -32,6 +32,9 @@ OP_CMP_GT       = 18
 # LOW-LEVEL ENCODING HELPERS
 # ============================================================
 
+def _test_rax_rax():
+    return b"\x48\x85\xC0"
+
 def _rex(w=1, r=0, x=0, b=0):
     return bytes([0x40 | (w << 3) | (r << 2) | (x << 1) | b])
 
