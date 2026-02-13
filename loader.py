@@ -271,3 +271,5 @@ def run(path: str) -> int:
         return result
 
     raise RuntimeError("Unsupported file type")
+
+from dispatcher import *
