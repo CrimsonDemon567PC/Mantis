@@ -14,6 +14,8 @@ import platform
 
 from backend_x64 import emit_x64
 from backend_arm64 import emit_arm64
+from string_runtime import StringRuntimeX64, StringRuntimeARM64
+
 
 def _extract_string_blob(bytecode: memoryview) -> bytes:
     """
@@ -241,14 +243,21 @@ class Bundle:
 
 def _translate(bytecode: memoryview) -> bytes:
     """
-    Dispatch portable ISA → native machine code.
+    Dispatch portable ISA → native machine code and append
+    the architecture-specific string runtime blob.
     """
 
+    code_bytes = bytecode.tobytes()
+
     if ARCH == "x64":
-        return emit_x64(bytecode.tobytes())
+        native = emit_x64(code_bytes)
+        runtime = StringRuntimeX64().build()
+        return native + runtime
 
     if ARCH == "arm64":
-        return emit_arm64(bytecode.tobytes())
+        native = emit_arm64(code_bytes)
+        runtime = StringRuntimeARM64().build()
+        return native + runtime
 
     raise RuntimeError("No backend for architecture")
 
