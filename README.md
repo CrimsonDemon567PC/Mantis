@@ -222,5 +222,6 @@ MIT
 
 ## 12 Package Index
 [Mantis Package Index](https://mantispi.page.gd)
+Note: Uploaded files are renamed to bin, rename and extract to use and please try to upload only zip files, if it is possible for your purpose.
 # END OF README
 
