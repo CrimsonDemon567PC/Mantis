@@ -1,6 +1,6 @@
 # ============================================================
 # Mantis 7 — Native ARM64 Backend
-# Single-function MTN → AArch64 machine code (AAPCS64)
+# Single-function MTN → AArch64 machine code
 # ============================================================
 
 from __future__ import annotations
@@ -29,198 +29,128 @@ OP_CMP_GT       = 18
 
 
 # ============================================================
-# ARM64 ENCODING HELPERS
+# ENCODING HELPERS
 # ============================================================
 
 def _u32(x: int) -> bytes:
     return struct.pack("<I", x)
 
 
-def _movz(rd: int, imm16: int, shift: int):
-    return _u32(0xD2800000 | (shift << 21) | (imm16 << 5) | rd)
-
-
-def _movk(rd: int, imm16: int, shift: int):
-    return _u32(0xF2800000 | (shift << 21) | (imm16 << 5) | rd)
-
-
-def _mov_imm64(rd: int, val: int) -> bytes:
+def _mov_imm64_x0(value: int) -> bytes:
     """
-    Build a 64-bit immediate in rd using MOVZ/MOVK.
+    Load a 64-bit immediate into x0 using MOVZ/MOVK.
+    v1: simple 3-part sequence (lower 48 bits are enough for most cases).
     """
-    parts = []
-    for i in range(4):
-        imm = (val >> (i * 16)) & 0xFFFF
-        if i == 0:
-            parts.append(_movz(rd, imm, i))
-        else:
-            parts.append(_movk(rd, imm, i))
-    return b"".join(parts)
+    lo16  =  value        & 0xFFFF
+    mid16 = (value >> 16) & 0xFFFF
+    hi16  = (value >> 32) & 0xFFFF
+
+    ins = []
+    ins.append(0xD2800000 | (lo16 << 5))          # movz x0, lo16
+    ins.append(0xF2A00000 | (mid16 << 5))        # movk x0, mid16, lsl #16
+    ins.append(0xF2C00000 | (hi16 << 5))         # movk x0, hi16, lsl #32
+    return b"".join(_u32(i) for i in ins)
 
 
-def _add(rd, rn, rm):
-    return _u32(0x8B000000 | (rm << 16) | (rn << 5) | rd)
-
-
-def _sub(rd, rn, rm):
-    return _u32(0xCB000000 | (rm << 16) | (rn << 5) | rd)
-
-
-def _mul(rd, rn, rm):
-    return _u32(0x9B007C00 | (rm << 16) | (rn << 5) | rd)
-
-
-def _sdiv(rd, rn, rm):
-    return _u32(0x9AC00C00 | (rm << 16) | (rn << 5) | rd)
-
-
-def _cmp(rn, rm):
+def _load_stack(offset: int) -> bytes:
     """
-    cmp rn, rm  (alias: subs xzr, rn, rm)
+    ldr x0, [x29, #offset]
+    x29 is the frame pointer (fp).
     """
-    return _u32(0xEB00001F | (rm << 16) | (rn << 5))
+    # offset must be a multiple of 8 and within encodable range
+    imm = offset // 8
+    return _u32(0xF9400000 | (imm << 10) | 29 << 5 | 0)  # ldr x0, [x29, #imm*8]
 
 
-def _cset(rd, cond):
+def _store_stack(offset: int) -> bytes:
     """
-    cset rd, cond
+    str x0, [x29, #offset]
     """
-    return _u32(0x9A9F07E0 | (cond << 12) | rd)
+    imm = offset // 8
+    return _u32(0xF9000000 | (imm << 10) | 29 << 5 | 0)  # str x0, [x29, #imm*8]
 
 
-def _ldr_stack(rt, offset):
+def _add_x0_x0_x1() -> bytes:
+    return _u32(0x8B010000)  # add x0, x0, x1
+
+
+def _sub_x0_x0_x1() -> bytes:
+    return _u32(0xCB010000)  # sub x0, x0, x1
+
+
+def _mul_x0_x0_x1() -> bytes:
+    return _u32(0x9B017C00)  # mul x0, x0, x1
+
+
+def _sdiv_x0_x0_x1() -> bytes:
+    return _u32(0x9AC10C00)  # sdiv x0, x0, x1
+
+
+def _cmp_x0_x1() -> bytes:
+    return _u32(0xEB01001F)  # cmp x0, x1
+
+
+def _cset_x0_eq() -> bytes:
+    return _u32(0x9A9F17E0)  # cset x0, eq
+
+
+def _cset_x0_lt() -> bytes:
+    return _u32(0x9A9F13E0)  # cset x0, lt
+
+
+def _cset_x0_gt() -> bytes:
+    return _u32(0x9A9F1BE0)  # cset x0, gt
+
+
+def _b_cond(op: int) -> bytes:
     """
-    ldr rt, [fp, #offset]
-    fp = x29
+    Conditional branch with placeholder imm19.
+    op is the condition code in the low 4 bits.
     """
-    return _u32(0xF9400000 | ((offset // 8) << 10) | (29 << 5) | rt)
+    return _u32(0x54000000 | (op & 0xF))  # imm19 patched later
 
 
-def _str_stack(rt, offset):
-    """
-    str rt, [fp, #offset]
-    fp = x29
-    """
-    return _u32(0xF9000000 | ((offset // 8) << 10) | (29 << 5) | rt)
+def _b_uncond() -> bytes:
+    return _u32(0x14000000)  # b <imm19>, patched later
 
 
-def _ret():
-    return _u32(0xD65F03C0)
+def _bl() -> bytes:
+    return _u32(0x94000000)  # bl <imm26>, patched later
 
 
-def _b(offset):
-    """
-    Unconditional branch (rel32 >> 2)
-    """
-    return _u32(0x14000000 | ((offset >> 2) & 0x03FFFFFF))
+def _cbz_x0() -> bytes:
+    return _u32(0xB4000000)  # cbz x0, <imm19>, patched later
 
 
-def _b_cond(offset, cond):
-    """
-    Conditional branch with condition code.
-    """
-    return _u32(0x54000000 | (((offset >> 2) & 0x7FFFF) << 5) | cond)
+def _stp_fp_lr_pre() -> bytes:
+    return _u32(0xA9BF7BF0)  # stp x29, x30, [sp, #-16]!
 
 
-def _bl(offset):
-    """
-    Branch with link.
-    """
-    return _u32(0x94000000 | ((offset >> 2) & 0x03FFFFFF))
+def _ldp_fp_lr_post() -> bytes:
+    return _u32(0xA8C17BF0)  # ldp x29, x30, [sp], #16
 
 
-def _stp_fp_lr():
-    """
-    stp x29, x30, [sp, #-16]!
-    """
-    return _u32(0xA9BF7BFD)
+def _mov_fp_sp() -> bytes:
+    return _u32(0x910003FD)  # mov x29, sp
 
 
-def _ldp_fp_lr():
-    """
-    ldp x29, x30, [sp], #16
-    """
-    return _u32(0xA8C17BFD)
+def _sub_sp_imm(imm: int) -> bytes:
+    # sub sp, sp, #imm (imm multiple of 16)
+    return _u32(0xD10003FF | ((imm & 0xFFF) << 10))
 
 
-def _mov_fp_sp():
-    """
-    mov x29, sp
-    """
-    return _u32(0x910003FD)
-
-
-def _sub_sp(size):
-    """
-    sub sp, sp, #size
-    """
-    return _u32(0xD10003FF | ((size & 0xFFF) << 10))
-
-
-def _add_sp(size):
-    """
-    add sp, sp, #size
-    """
-    return _u32(0x910003FF | ((size & 0xFFF) << 10))
-
-
-# -------- FP helpers (D‑registers, d0/d1) --------
-
-def _fmov_d0_x0():
-    """
-    fmov d0, x0
-    """
-    return _u32(0x9E660000)
-
-
-def _fmov_x0_d0():
-    """
-    fmov x0, d0
-    """
-    return _u32(0x9E660000 | (0 << 5) | 0)
-
-
-def _fadd_d0_d0_d1():
-    """
-    fadd d0, d0, d1
-    """
-    return _u32(0x1E602800 | (1 << 16) | (0 << 5) | 0)
-
-
-def _fsub_d0_d0_d1():
-    """
-    fsub d0, d0, d1
-    """
-    return _u32(0x1E603800 | (1 << 16) | (0 << 5) | 0)
-
-
-def _fmul_d0_d0_d1():
-    """
-    fmul d0, d0, d1
-    """
-    return _u32(0x1E600800 | (1 << 16) | (0 << 5) | 0)
-
-
-def _fdiv_d0_d0_d1():
-    """
-    fdiv d0, d0, d1
-    """
-    return _u32(0x1E601800 | (1 << 16) | (0 << 5) | 0)
-
-
-def _fcmp_d0_d1():
-    """
-    fcmp d0, d1
-    """
-    return _u32(0x1E602000 | (1 << 16) | (0 << 5))
+def _add_sp_imm(imm: int) -> bytes:
+    # add sp, sp, #imm
+    return _u32(0x910003FF | ((imm & 0xFFF) << 10))
 
 
 # ============================================================
-# ABI ARGUMENT REGISTERS (AAPCS64)
-# x0-x7
+# ABI ARGUMENT REGISTERS (AArch64)
+# x0, x1, x2, x3, x4, x5
 # ============================================================
 
-ABI_REGS = list(range(8))
+ABI_REGS = [0, 1, 2, 3, 4, 5]
+
 
 # ============================================================
 # MAIN EMITTER
@@ -229,10 +159,13 @@ ABI_REGS = list(range(8))
 def emit_arm64(bytecode: bytes) -> bytes:
     """
     Translate a single-function MTN bytecode buffer into AArch64
-    machine code using AAPCS64 calling convention.
-    - x0 is primary value register
-    - x1 is secondary value register
-    - d0/d1 werden für F64-Arithmetik genutzt, Ergebnis zurück in x0
+    machine code.
+
+    Conventions:
+      - x0 is the primary value register
+      - x1 is the secondary value register
+      - stack slots are addressed via x29-relative offsets
+      - floats are not yet handled in v1 (F64 opcodes still map to raw bits)
     """
 
     # ---------- parse MTN header ----------
@@ -247,169 +180,139 @@ def emit_arm64(bytecode: bytes) -> bytes:
     code_len = struct.unpack_from("<I", bytecode, pos)[0]
     pos += 4
 
-    instrs = []
+    instrs: list[tuple[int, int, int, int]] = []
     for _ in range(code_len):
         op, a, b, c = struct.unpack_from("<Biii", bytecode, pos)
         pos += 13
         instrs.append((op, a, b, c))
 
-    # =========================================================
-    # CODEGEN
-    # =========================================================
-
     out = bytearray()
 
     # ---------- prologue ----------
-    out += _stp_fp_lr()
+    out += _stp_fp_lr_pre()
     out += _mov_fp_sp()
-    out += _sub_sp(32)  # fixed local space (v1)
+    out += _sub_sp_imm(32)  # fixed local space for v1
 
-    labels = []   # byte offset of each instruction
-    fixups = []   # (patch_pos, target_index, kind)
-    last_was_float = False  # simple type flag for top-of-stack
+    labels: list[int] = []
+    fixups_branch: list[tuple[int, int]] = []  # (pos, target_index)
+    last_was_float = False  # reserved for future F64 support
 
     for i, (op, a, b, c) in enumerate(instrs):
-
         labels.append(len(out))
 
-        # ---------- CONST ----------
+        # ---------- CONSTANTS ----------
         if op == OP_CONST_I64:
-            out += _mov_imm64(0, a)
+            out += _mov_imm64_x0(a)
             last_was_float = False
 
         elif op == OP_CONST_F64:
-            # load raw 64-bit payload into x0, mirror into d0
-            out += _mov_imm64(0, a)
-            out += _fmov_d0_x0()
+            # v1: treat as raw bits in x0
+            out += _mov_imm64_x0(a)
             last_was_float = True
 
         # ---------- LOAD / STORE ----------
         elif op == OP_LOAD:
-            out += _ldr_stack(0, a)
-            last_was_float = False  # v1: stack hält i64/pointer
+            out += _load_stack(a)
+            last_was_float = False
 
         elif op == OP_STORE:
-            out += _str_stack(0, a)
-            # Typflag bleibt unverändert
+            out += _store_stack(a)
 
-        # ---------- ARITH ----------
+        # ---------- ARITHMETIC ----------
         elif op == OP_ADD:
-            if last_was_float:
-                # float: d0 = d0 + d1 (x1 → d1), Ergebnis zurück nach x0
-                out += _fmov_d0_x0()      # sicherstellen, dass d0 aus x0 kommt
-                # x1 wird vom Frontend befüllt; hier nur FP-ALU
-                out += _fadd_d0_d0_d1()
-                out += _fmov_x0_d0()
-            else:
-                out += _add(0, 0, 1)
+            out += _add_x0_x0_x1()
+            last_was_float = False
 
         elif op == OP_SUB:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fsub_d0_d0_d1()
-                out += _fmov_x0_d0()
-            else:
-                out += _sub(0, 0, 1)
+            out += _sub_x0_x0_x1()
+            last_was_float = False
 
         elif op == OP_MUL:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fmul_d0_d0_d1()
-                out += _fmov_x0_d0()
-            else:
-                out += _mul(0, 0, 1)
+            out += _mul_x0_x0_x1()
+            last_was_float = False
 
         elif op == OP_DIV:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fdiv_d0_d0_d1()
-                out += _fmov_x0_d0()
-            else:
-                out += _sdiv(0, 0, 1)
+            out += _sdiv_x0_x0_x1()
+            last_was_float = False
 
-        # ---------- CMP ----------
+        # ---------- COMPARISONS ----------
         elif op == OP_CMP_EQ:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fcmp_d0_d1()
-                out += _cset(0, 0x0)  # EQ
-                last_was_float = False
-            else:
-                out += _cmp(0, 1)
-                out += _cset(0, 0x0)  # EQ
-                last_was_float = False
+            out += _cmp_x0_x1()
+            out += _cset_x0_eq()
+            last_was_float = False
 
         elif op == OP_CMP_LT:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fcmp_d0_d1()
-                out += _cset(0, 0xB)  # LT
-                last_was_float = False
-            else:
-                out += _cmp(0, 1)
-                out += _cset(0, 0xB)  # LT
-                last_was_float = False
+            out += _cmp_x0_x1()
+            out += _cset_x0_lt()
+            last_was_float = False
 
         elif op == OP_CMP_GT:
-            if last_was_float:
-                out += _fmov_d0_x0()
-                out += _fcmp_d0_d1()
-                out += _cset(0, 0xC)  # GT
-                last_was_float = False
-            else:
-                out += _cmp(0, 1)
-                out += _cset(0, 0xC)  # GT
-                last_was_float = False
+            out += _cmp_x0_x1()
+            out += _cset_x0_gt()
+            last_was_float = False
 
-        # ---------- JMP ----------
+        # ---------- JUMPS ----------
         elif op == OP_JMP:
-            fixups.append((len(out), a, "b"))
-            out += _b(0)
+            fixups_branch.append((len(out), a))
+            out += _b_uncond()
 
-        # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
-            # branch if x0 == 0 (ints, pointers, bools; floats: nonzero bits = true)
-            out += _cmp(0, 31)          # cmp x0, xzr
-            fixups.append((len(out), a, "bz"))
-            out += _b_cond(0, 0x0)      # b.eq
+            out += _cbz_x0()
+            fixups_branch.append((len(out) - 4, a))
 
-        # ---------- CALL ----------
+        # ---------- CALLS ----------
         elif op == OP_CALL:
             argc = b
 
-            # v1: move arguments into x0-x7 in trivial way
-            # Strings/f-strings: Werte sind i64-Pointer, Backend ist typagnostisch
+            # Move arguments into ABI registers (x0, x1, x2, ...)
+            # v1: arguments are evaluated into x0 sequentially; here we only
+            # mirror the last value into x0..xN in a trivial way.
             for i_arg in range(argc):
-                out += _mov_imm64(ABI_REGS[i_arg], 0)
+                reg = ABI_REGS[i_arg]
+                if reg != 0:
+                    # mov xN, x0
+                    out += _u32(0xAA0003E0 | (reg << 5))  # mov xN, x0
 
-            fixups.append((len(out), a, "bl"))
-            out += _bl(0)
-            last_was_float = False  # Rückgabewert-Typ unbekannt
+            if a < 0:
+                # Builtin calls are handled outside this backend.
+                # a == -1: print(...)
+                # a == -2: concat(a, b)
+                # a == -3: to_string(x)
+                last_was_float = False
+            else:
+                # Normal function calls (not used in v1, but structurally supported)
+                fixups_branch.append((len(out), a))
+                out += _bl()
+                last_was_float = False
 
         # ---------- RETURN ----------
         elif op == OP_RETURN:
-            out += _add_sp(32)
-            out += _ldp_fp_lr()
-            out += _ret()
+            out += _add_sp_imm(32)
+            out += _ldp_fp_lr_post()
+            out += _u32(0xD65F03C0)  # ret
 
         else:
             raise RuntimeError(f"Unsupported opcode {op}")
 
-    # ---------- resolve branches & calls ----------
-    for pos_fix, target, kind in fixups:
+    # ---------- resolve branches and calls ----------
+    for pos, target in fixups_branch:
+        src = pos
         dst = labels[target]
-        rel = dst - pos_fix
+        # imm19 for B/CBZ: (dst - src) >> 2
+        ins = struct.unpack_from("<I", out, pos)[0]
+        if (ins & 0x7C000000) == 0x14000000:
+            # B or BL: imm26
+            imm26 = (dst - src) >> 2
+            ins = (ins & 0xFC000000) | (imm26 & 0x03FFFFFF)
+        else:
+            # CBZ/B.cond: imm19
+            imm19 = (dst - src) >> 2
+            ins = (ins & 0xFF00001F) | ((imm19 & 0x7FFFF) << 5)
+        out[pos:pos+4] = _u32(ins)
 
-        if kind == "b":
-            out[pos_fix:pos_fix + 4] = _b(rel)
-        elif kind == "bz":
-            out[pos_fix:pos_fix + 4] = _b_cond(rel, 0x0)
-        elif kind == "bl":
-            out[pos_fix:pos_fix + 4] = _bl(rel)
-
-    # ---------- safety epilogue ----------
-    out += _add_sp(32)
-    out += _ldp_fp_lr()
-    out += _ret()
+    # Safety epilogue in case of fallthrough
+    out += _add_sp_imm(32)
+    out += _ldp_fp_lr_post()
+    out += _u32(0xD65F03C0)  # ret
 
     return bytes(out)
