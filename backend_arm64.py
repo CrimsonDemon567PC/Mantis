@@ -222,6 +222,11 @@ def emit_arm64(bytecode: bytes) -> bytes:
         if op == OP_CONST_I64:
             out += _mov_imm64(0, a)
 
+        elif op == OP_CONST_F64:
+            # v1: treat F64 constant as raw 64-bit payload in x0
+            # (no separate FP pipeline yet)
+            out += _mov_imm64(0, a)
+
         # ---------- LOAD / STORE ----------
         elif op == OP_LOAD:
             out += _ldr_stack(0, a)
@@ -262,16 +267,18 @@ def emit_arm64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
+            # branch if x0 == 0 (false)
             out += _cmp(0, 31)          # cmp x0, xzr
             fixups.append((len(out), a, "bz"))
             out += _b_cond(0, 0x0)      # b.eq
-
 
         # ---------- CALL ----------
         elif op == OP_CALL:
             argc = b
 
             # v1: move arguments into x0-x7 in a trivial way
+            # (hier nur Platzhalter, da das aktuelle IR keine
+            #  echten Multi-Register-Argumente modelliert)
             for i_arg in range(argc):
                 out += _mov_imm64(ABI_REGS[i_arg], 0)
 
