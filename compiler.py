@@ -674,7 +674,70 @@ def _emit_method_call(self, obj_type: StructType, name: str, argc: int):
     self.current.emit(OP_CALL, fn.addr, argc)
     return fn.ret
 
+# --- Strings ---
 
+def visit_JoinedStr(self, node: ast.JoinedStr):
+    # Start: push empty string
+    self.current.emit(OP_CONST_I64, self._intern_string(b""))
+    result_type = Str()
+
+    for part in node.values:
+        if isinstance(part, ast.Constant):
+            # constant string segment
+            ptr = self._intern_string(part.value.encode("utf-8"))
+            self.current.emit(OP_CONST_I64, ptr)
+            # concat
+            self.current.emit(OP_CALL, -2, 2)  # builtin concat id = -2
+
+        elif isinstance(part, ast.FormattedValue):
+            # compile inner expression
+            t = self.visit(part.value)
+            # convert non-string to string
+            self.current.emit(OP_CALL, -3, 1)  # builtin to_string id = -3
+            # concat
+            self.current.emit(OP_CALL, -2, 2)
+
+        else:
+            raise NotImplementedError(type(part))
+
+    return result_type
+
+
+def visit_FormattedValue(self, node: ast.FormattedValue):
+    # Should never be called directly
+    return self.visit(node.value)
+
+
+def visit_JoinedStr(self, node: ast.JoinedStr):
+    # Start: push empty string
+    self.current.emit(OP_CONST_I64, self._intern_string(b""))
+    result_type = Str()
+
+    for part in node.values:
+        if isinstance(part, ast.Constant):
+            # constant string segment
+            ptr = self._intern_string(part.value.encode("utf-8"))
+            self.current.emit(OP_CONST_I64, ptr)
+            # concat
+            self.current.emit(OP_CALL, -2, 2)  # builtin concat id = -2
+
+        elif isinstance(part, ast.FormattedValue):
+            # compile inner expression
+            t = self.visit(part.value)
+            # convert non-string to string
+            self.current.emit(OP_CALL, -3, 1)  # builtin to_string id = -3
+            # concat
+            self.current.emit(OP_CALL, -2, 2)
+
+        else:
+            raise NotImplementedError(type(part))
+
+    return result_type
+
+
+def visit_FormattedValue(self, node: ast.FormattedValue):
+    # Should never be called directly
+    return self.visit(node.value)
 
 
 # ------------------------------------------------------------
@@ -777,3 +840,5 @@ Compiler._emit_method_call = _emit_method_call
 Compiler.visit_BinOp = visit_BinOp
 Compiler._strip_dead_code = _strip_dead_code
 Compiler._emit_bytecode = _emit_bytecode
+Compiler.visit_JoinedStr = visit_JoinedStr
+Compiler.visit_FormattedValue = visit_FormattedValue
