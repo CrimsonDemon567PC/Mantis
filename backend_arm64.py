@@ -262,9 +262,10 @@ def emit_arm64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
-            out += _cmp(0, 31)  # cmp x0, xzr
+            out += _cmp(0, 31)          # cmp x0, xzr
             fixups.append((len(out), a, "bz"))
-            out += _b_cond(0, 0x0)  # EQ → zero
+            out += _b_cond(0, 0x0)      # b.eq
+
 
         # ---------- CALL ----------
         elif op == OP_CALL:
