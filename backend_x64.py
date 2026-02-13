@@ -140,6 +140,52 @@ def _call_rel32():
     return b"\xE8\x00\x00\x00\x00"
 
 
+# -------- SSE2 / Float helpers --------
+
+def _movq_xmm0_rax():
+    """
+    movq xmm0, rax
+    """
+    return b"\x66\x48\x0F\x6E\xC0"
+
+
+def _movq_xmm1_rbx():
+    """
+    movq xmm1, rbx
+    """
+    return b"\x66\x48\x0F\x6E\xCB"
+
+
+def _movq_rax_xmm0():
+    """
+    movq rax, xmm0
+    """
+    return b"\x66\x48\x0F\x7E\xC0"
+
+
+def _ucomisd_xmm0_xmm1():
+    """
+    ucomisd xmm0, xmm1
+    """
+    return b"\x66\x0F\x2E\xC1"
+
+
+def _addsd_xmm0_xmm1():
+    return b"\xF2\x0F\x58\xC1"
+
+
+def _subsd_xmm0_xmm1():
+    return b"\xF2\x0F\x5C\xC1"
+
+
+def _mulsd_xmm0_xmm1():
+    return b"\xF2\x0F\x59\xC1"
+
+
+def _divsd_xmm0_xmm1():
+    return b"\xF2\x0F\x5E\xC1"
+
+
 # ============================================================
 # STACK ACCESS (RBP-RELATIVE)
 # ============================================================
@@ -165,7 +211,6 @@ def _store_stack(offset):
 
 ABI_REGS = [7, 6, 2, 1, 8, 9]
 
-
 # ============================================================
 # MAIN EMITTER
 # ============================================================
@@ -175,7 +220,9 @@ def emit_x64(bytecode: bytes) -> bytes:
     Translate a single-function MTN bytecode buffer into x86-64
     machine code. Uses a simple register convention:
     - rax is the primary value register
+    - rbx is the secondary value register
     - stack slots are addressed via rbp-relative offsets
+    - floats use xmm0/xmm1 internally, result mirrored back to rax
     """
 
     # ---------- parse MTN header ----------
@@ -209,6 +256,7 @@ def emit_x64(bytecode: bytes) -> bytes:
 
     labels = []  # byte offset of each instruction
     fixups = []  # (patch_pos, target_index)
+    last_was_float = False  # simple type flag for top-of-stack
 
     for i, (op, a, b, c) in enumerate(instrs):
 
@@ -217,48 +265,98 @@ def emit_x64(bytecode: bytes) -> bytes:
         # ---------- CONST ----------
         if op == OP_CONST_I64:
             out += _mov_imm64(0, a)
+            last_was_float = False
 
         elif op == OP_CONST_F64:
-            # v1: treat F64 constant as raw 64-bit payload in rax
-            # (no separate FP pipeline yet)
+            # load raw 64-bit payload into rax, mirror into xmm0
             out += _mov_imm64(0, a)
+            out += _movq_xmm0_rax()
+            last_was_float = True
 
         # ---------- LOAD / STORE ----------
         elif op == OP_LOAD:
             out += _load_stack(a)
+            last_was_float = False  # v1: stack holds plain i64 / pointers
 
         elif op == OP_STORE:
             out += _store_stack(a)
+            # type flag unchanged (store doesn't change top-of-stack)
 
         # ---------- ARITH ----------
         elif op == OP_ADD:
-            out += _rr(b"\x01", 0, 3)  # add rax, rbx
+            if last_was_float:
+                # float: xmm0 = xmm0 + xmm1 (rbx → xmm1), result back to rax
+                out += _movq_xmm1_rbx()
+                out += _addsd_xmm0_xmm1()
+                out += _movq_rax_xmm0()
+            else:
+                # integer: add rax, rbx
+                out += _rr(b"\x01", 0, 3)
 
         elif op == OP_SUB:
-            out += _rr(b"\x29", 0, 3)  # sub rax, rbx
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _subsd_xmm0_xmm1()
+                out += _movq_rax_xmm0()
+            else:
+                out += _rr(b"\x29", 0, 3)  # sub rax, rbx
 
         elif op == OP_MUL:
-            out += _rr(b"\x0F\xAF", 0, 3)  # imul rax, rbx
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _mulsd_xmm0_xmm1()
+                out += _movq_rax_xmm0()
+            else:
+                out += _rr(b"\x0F\xAF", 0, 3)  # imul rax, rbx
 
         elif op == OP_DIV:
-            out += _cqo()
-            out += _idiv(3)  # idiv rbx
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _divsd_xmm0_xmm1()
+                out += _movq_rax_xmm0()
+            else:
+                out += _cqo()
+                out += _idiv(3)  # idiv rbx
 
         # ---------- CMP ----------
         elif op == OP_CMP_EQ:
-            out += _cmp(0, 3)
-            out += _setcc(0x94)  # sete
-            out += _movzx_rax_al()
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _ucomisd_xmm0_xmm1()
+                out += _setcc(0x94)  # sete
+                out += _movzx_rax_al()
+                last_was_float = False
+            else:
+                out += _cmp(0, 3)
+                out += _setcc(0x94)  # sete
+                out += _movzx_rax_al()
+                last_was_float = False
 
         elif op == OP_CMP_LT:
-            out += _cmp(0, 3)
-            out += _setcc(0x9C)  # setl
-            out += _movzx_rax_al()
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _ucomisd_xmm0_xmm1()
+                out += _setcc(0x9C)  # setl
+                out += _movzx_rax_al()
+                last_was_float = False
+            else:
+                out += _cmp(0, 3)
+                out += _setcc(0x9C)  # setl
+                out += _movzx_rax_al()
+                last_was_float = False
 
         elif op == OP_CMP_GT:
-            out += _cmp(0, 3)
-            out += _setcc(0x9F)  # setg
-            out += _movzx_rax_al()
+            if last_was_float:
+                out += _movq_xmm1_rbx()
+                out += _ucomisd_xmm0_xmm1()
+                out += _setcc(0x9F)  # setg
+                out += _movzx_rax_al()
+                last_was_float = False
+            else:
+                out += _cmp(0, 3)
+                out += _setcc(0x9F)  # setg
+                out += _movzx_rax_al()
+                last_was_float = False
 
         # ---------- JMP ----------
         elif op == OP_JMP:
@@ -267,7 +365,7 @@ def emit_x64(bytecode: bytes) -> bytes:
 
         # ---------- JMP IF FALSE ----------
         elif op == OP_JMP_IF_FALSE:
-            # branch if rax == 0
+            # branch if rax == 0 (for ints, pointers, bools; floats: nonzero bits = true)
             out += _test_rax_rax()
             fixups.append((len(out) + 2, a))
             out += _jz_rel32()
@@ -276,14 +374,16 @@ def emit_x64(bytecode: bytes) -> bytes:
         elif op == OP_CALL:
             argc = b
 
-            # move arguments into ABI registers
-            # (v1: assumes values are already in registers/stack)
+            # v1: move arguments into ABI registers in trivial way
+            # (Strings/f-strings: Werte sind i64-Pointer, Backend ist typagnostisch)
             for i_arg in range(argc):
                 reg = ABI_REGS[i_arg]
-                out += _rr(b"\x89", reg, 0)  # mov reg, rax (simple model)
+                out += _rr(b"\x89", reg, 0)  # mov reg, rax
 
             fixups.append((len(out) + 1, a))
             out += _call_rel32()
+            # nach CALL: Rückgabewert in rax, Typflag unbekannt → konservativ
+            last_was_float = False
 
         # ---------- RETURN ----------
         elif op == OP_RETURN:
