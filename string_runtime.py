@@ -7,15 +7,15 @@
 #   - __mantis_strlen
 #   - __mantis_memcpy
 #   - __mantis_string_concat
+#   - __mantis_format_i64
 #
-# Two architectures:
-#   - StringRuntimeX64
-#   - StringRuntimeARM64
-#
-# loader.py usage:
-#     from string_runtime import StringRuntimeX64
-#     runtime = StringRuntimeX64().build()
-#     blob = code + runtime
+# build() now returns: (blob, offsets)
+# offsets = {
+#     "strlen": <offset>,
+#     "memcpy": <offset>,
+#     "concat": <offset>,
+#     "format_i64": <offset>,
+# }
 # ============================================================
 
 from __future__ import annotations
@@ -45,10 +45,13 @@ class StringRuntimeX64(_RuntimeBase):
         __mantis_strlen
         __mantis_memcpy
         __mantis_string_concat
+        __mantis_format_i64
     plus a bump‑allocated heap appended after the code.
+
+    build() returns (blob, offsets)
     """
 
-    def build(self) -> bytes:
+    def build(self) -> tuple[bytes, dict[str, int]]:
         out = bytearray()
         labels = {}
         fixups = []
@@ -63,8 +66,6 @@ class StringRuntimeX64(_RuntimeBase):
 
         # ====================================================
         # __mantis_strlen
-        #   rdi = s
-        #   rax = len
         # ====================================================
         mark("__mantis_strlen")
         out += b"\x48\x89\xF8"          # mov rax, rdi
@@ -75,12 +76,10 @@ class StringRuntimeX64(_RuntimeBase):
         jrel(b"\xE9\x00\x00\x00\x00", "strlen_loop")
         mark("strlen_done")
         out += b"\x48\x29\xF8"          # sub rax, rdi
-        out += b"\xC3"                  # ret
+        out += b"\xC3"
 
         # ====================================================
         # __mantis_memcpy
-        #   rdi = dst, rsi = src, rdx = n
-        #   rax = dst
         # ====================================================
         mark("__mantis_memcpy")
         out += b"\x48\x89\xF8"          # mov rax, rdi
@@ -98,88 +97,143 @@ class StringRuntimeX64(_RuntimeBase):
 
         # ====================================================
         # __mantis_string_concat
-        #   rdi = a, rsi = b
-        #   rax = result
         # ====================================================
         mark("__mantis_string_concat")
 
-        # Save registers
         out += b"\x53"          # push rbx
         out += b"\x41\x52"      # push r10
         out += b"\x41\x53"      # push r11
-        out += b"\x57"          # push rdi (save a)
-        out += b"\x56"          # push rsi (save b)
+        out += b"\x57"          # push rdi
+        out += b"\x56"          # push rsi
 
-        # len_a = strlen(a)
-        out += b"\x48\x89\xFF"  # mov rdi, rdi
+        # len_a
+        out += b"\x48\x89\xFF"
         rel = labels["__mantis_strlen"] - (len(out) + 5)
         out += b"\xE8" + self._i32(rel)
-        out += b"\x49\x89\xC2"  # mov r10, rax
+        out += b"\x49\x89\xC2"
 
-        # len_b = strlen(b)
-        out += b"\x48\x89\xF7"  # mov rdi, rsi
+        # len_b
+        out += b"\x48\x89\xF7"
         rel = labels["__mantis_strlen"] - (len(out) + 5)
         out += b"\xE8" + self._i32(rel)
-        out += b"\x49\x89\xC3"  # mov r11, rax
+        out += b"\x49\x89\xC3"
 
-        # total = len_a + len_b
-        out += b"\x4D\x01\xDA"  # add r10, r11
+        # total = r10 + r11
+        out += b"\x4D\x01\xDA"
 
         # rdx = total + 1
-        out += b"\x4C\x89\xD2"  # mov rdx, r10
-        out += b"\x48\xFF\xC2"  # inc rdx
+        out += b"\x4C\x89\xD2"
+        out += b"\x48\xFF\xC2"
 
-        # Load heap_ptr (RIP‑relative)
+        # heap_ptr load
         mark("heap_ptr_lea")
         out += b"\x48\x8D\x05\x00\x00\x00\x00"
         heap_ptr_patch = len(out) - 4
 
-        out += b"\x48\x8B\x18"  # mov rbx, [rax]
-        out += b"\x48\x85\xDB"  # test rbx, rbx
+        out += b"\x48\x8B\x18"
+        out += b"\x48\x85\xDB"
         jrel(b"\x0F\x85\x00\x00\x00\x00", "heap_inited")
 
-        # init heap_ptr = rax + 8
         out += b"\x48\x8D\x58\x08"
         out += b"\x48\x89\x18"
 
         mark("heap_inited")
 
-        # rcx = result
-        out += b"\x48\x89\xD9"
+        out += b"\x48\x89\xD9"  # rcx = result
 
-        # bump
-        out += b"\x48\x01\xD3"
+        out += b"\x48\x01\xD3"  # bump
         out += b"\x48\x89\x18"
 
-        # rax = result
-        out += b"\x48\x89\xC8"
+        out += b"\x48\x89\xC8"  # rax = result
 
         # memcpy(result, a, len_a)
-        out += b"\x48\x89\xC7"  # mov rdi, rax
-        out += b"\x4C\x89\xD2"  # mov rdx, r10
-        out += b"\x5E"          # pop rsi (b)
-        out += b"\x5F"          # pop rdi (a)
-        out += b"\x48\x89\xF6"  # mov rsi, rsi (a)
+        out += b"\x48\x89\xC7"
+        out += b"\x4C\x89\xD2"
+        out += b"\x5E"
+        out += b"\x5F"
+        out += b"\x48\x89\xF6"
         rel = labels["__mantis_memcpy"] - (len(out) + 5)
         out += b"\xE8" + self._i32(rel)
 
-        # memcpy(result + len_a, b, len_b)
-        out += b"\x48\x01\xD0"  # add rax, rdx
-        out += b"\x48\x89\xC7"  # mov rdi, rax
-        out += b"\x48\x89\xF6"  # mov rsi, rsi (b)
-        out += b"\x4C\x89\xDA"  # mov rdx, r11
+        # memcpy(result+len_a, b, len_b)
+        out += b"\x48\x01\xD0"
+        out += b"\x48\x89\xC7"
+        out += b"\x48\x89\xF6"
+        out += b"\x4C\x89\xDA"
         rel = labels["__mantis_memcpy"] - (len(out) + 5)
         out += b"\xE8" + self._i32(rel)
 
-        # null‑terminate
-        out += b"\xC6\x00\x00"
+        out += b"\xC6\x00\x00"  # null
 
-        # restore registers
-        out += b"\x41\x5B"  # pop r11
-        out += b"\x41\x5A"  # pop r10
-        out += b"\x5B"      # pop rbx
+        out += b"\x41\x5B"
+        out += b"\x41\x5A"
+        out += b"\x5B"
+        out += b"\xC3"
 
-        out += b"\xC3"      # ret
+        # ====================================================
+        # __mantis_format_i64
+        # ====================================================
+        mark("__mantis_format_i64")
+
+        out += b"\x53"          # push rbx
+        out += b"\x41\x50"      # push r8
+        out += b"\x41\x51"      # push r9
+
+        out += b"\x48\x89\xFB"  # mov rbx, rdi
+
+        # sign
+        out += b"\x48\x89\xDF"
+        out += b"\x48\xC1\xEF\x3F"
+        out += b"\x48\x21\xDF"
+        out += b"\x48\x29\xDF"
+        out += b"\x48\x31\xDB"
+        out += b"\x48\x0F\x44\xDF"
+
+        # heap_ptr
+        mark("fmt_heap_lea")
+        out += b"\x48\x8D\x05\x00\x00\x00\x00"
+        fmt_heap_patch = len(out) - 4
+
+        out += b"\x48\x8B\x00"
+        out += b"\x48\x85\xC0"
+        jrel(b"\x0F\x85\x00\x00\x00\x00", "fmt_heap_inited")
+
+        out += b"\x48\x8D\x40\x08"
+        out += b"\x48\x89\x00"
+
+        mark("fmt_heap_inited")
+
+        out += b"\x49\x89\xC0"  # r8 = buf
+
+        out += b"\x48\x83\xC0\x20"
+        out += b"\x48\x89\x00"
+
+        out += b"\x4D\x31\xC9"  # r9 = 0
+
+        mark("fmt_loop")
+        out += b"\x48\x31\xD2"
+        out += b"\x48\xF7\xF3"
+        out += b"\x48\x89\xC3"
+        out += b"\x48\x83\xC2\x30"
+        out += b"\x42\x88\x14\x08"
+        out += b"\x49\xFF\xC1"
+        out += b"\x48\x85\xDB"
+        jrel(b"\x0F\x85\x00\x00\x00\x00", "fmt_loop")
+
+        out += b"\x48\x85\xFF"
+        jrel(b"\x0F\x84\x00\x00\x00\x00", "fmt_no_sign")
+        out += b"\xC6\x04\x08\x2D"
+        out += b"\x49\xFF\xC1"
+        mark("fmt_no_sign")
+
+        out += b"\xC6\x04\x08\x00"
+
+        out += b"\x4C\x89\xC0"  # mov rax,r8
+
+        out += b"\x41\x59"
+        out += b"\x41\x58"
+        out += b"\x5B"
+        out += b"\xC3"
 
         # ====================================================
         # Append heap_ptr + heap
@@ -202,7 +256,17 @@ class StringRuntimeX64(_RuntimeBase):
         rel = heap_ptr_offset - rip_after
         out[heap_ptr_patch:heap_ptr_patch+4] = self._i32(rel)
 
-        return bytes(out)
+        # Patch fmt_heap LEA
+        rip_after = fmt_heap_patch + 4
+        rel = heap_ptr_offset - rip_after
+        out[fmt_heap_patch:fmt_heap_patch+4] = self._i32(rel)
+
+        return bytes(out), {
+            "strlen": labels["__mantis_strlen"],
+            "memcpy": labels["__mantis_memcpy"],
+            "concat": labels["__mantis_string_concat"],
+            "format_i64": labels["__mantis_format_i64"],
+        }
 
 # ============================================================
 # ARM64 STRING RUNTIME
@@ -215,10 +279,13 @@ class StringRuntimeARM64(_RuntimeBase):
         __mantis_strlen
         __mantis_memcpy
         __mantis_string_concat
+        __mantis_format_i64
     plus a bump‑allocated heap appended after the code.
+
+    build() returns (blob, offsets)
     """
 
-    def build(self) -> bytes:
+    def build(self) -> tuple[bytes, dict[str, int]]:
         out = bytearray()
         labels = {}
         fixups = []
@@ -233,161 +300,106 @@ class StringRuntimeARM64(_RuntimeBase):
 
         # ====================================================
         # __mantis_strlen
-        #   x0 = s
-        #   returns length in x0
         # ====================================================
         mark("__mantis_strlen")
-
-        # mov x1, x0
-        out += struct.pack("<I", 0xAA0003E1)
+        out += struct.pack("<I", 0xAA0003E1)  # mov x1,x0
 
         mark("strlen_loop")
-        # ldrb w2, [x1]
-        out += struct.pack("<I", 0x39400022)
-        # cbz w2, done
-        br(0x34000000, "strlen_done")
-        # add x1, x1, #1
-        out += struct.pack("<I", 0x91000421)
-        # b loop
+        out += struct.pack("<I", 0x39400022)  # ldrb w2,[x1]
+        br(0x34000000, "strlen_done")        # cbz w2
+        out += struct.pack("<I", 0x91000421) # add x1,x1,#1
         br(0x14000000, "strlen_loop")
 
         mark("strlen_done")
-        # sub x0, x1, x0
-        out += struct.pack("<I", 0xCB000020)
-        # ret
-        out += struct.pack("<I", 0xD65F03C0)
+        out += struct.pack("<I", 0xCB000020) # sub x0,x1,x0
+        out += struct.pack("<I", 0xD65F03C0) # ret
 
         # ====================================================
         # __mantis_memcpy
-        #   x0 = dst, x1 = src, x2 = n
-        #   returns dst in x0
         # ====================================================
         mark("__mantis_memcpy")
-
-        # cbz x2, done
-        br(0xB4000000, "memcpy_done")
+        br(0xB4000000, "memcpy_done")        # cbz x2
 
         mark("memcpy_loop")
-        # ldrb w3, [x1]
-        out += struct.pack("<I", 0x39400023)
-        # strb w3, [x0]
-        out += struct.pack("<I", 0x39000003)
-        # add x1, x1, #1
-        out += struct.pack("<I", 0x91000421)
-        # add x0, x0, #1
-        out += struct.pack("<I", 0x91000400)
-        # sub x2, x2, #1
-        out += struct.pack("<I", 0xD1000442)
-        # cbnz x2, loop
-        br(0x35000000, "memcpy_loop")
+        out += struct.pack("<I", 0x39400023) # ldrb w3,[x1]
+        out += struct.pack("<I", 0x39000003) # strb w3,[x0]
+        out += struct.pack("<I", 0x91000421) # add x1,x1,#1
+        out += struct.pack("<I", 0x91000400) # add x0,x0,#1
+        out += struct.pack("<I", 0xD1000442) # sub x2,x2,#1
+        br(0x35000000, "memcpy_loop")        # cbnz x2
 
         mark("memcpy_done")
-        out += struct.pack("<I", 0xD65F03C0)  # ret
+        out += struct.pack("<I", 0xD65F03C0)
 
         # ====================================================
         # __mantis_string_concat
-        #   x0 = a
-        #   x1 = b
-        #   returns pointer in x0
         # ====================================================
         mark("__mantis_string_concat")
 
-        # Save x19,x20,x21,x22
-        out += struct.pack("<I", 0xA9BF4FF3)  # stp x19,x20,[sp,#-16]!
-        out += struct.pack("<I", 0xA9BF57F5)  # stp x21,x22,[sp,#-16]!
+        out += struct.pack("<I", 0xA9BF4FF3) # stp x19,x20,[sp,#-16]!
+        out += struct.pack("<I", 0xA9BF57F5) # stp x21,x22,[sp,#-16]!
 
-        # Save a,b
-        out += struct.pack("<I", 0xAA0003F3)  # mov x19, x0
-        out += struct.pack("<I", 0xAA0103F4)  # mov x20, x1
+        out += struct.pack("<I", 0xAA0003F3) # mov x19,x0
+        out += struct.pack("<I", 0xAA0103F4) # mov x20,x1
 
-        # len_a = strlen(a)
-        out += struct.pack("<I", 0xAA1303E0)  # mov x0, x19
+        # len_a
+        out += struct.pack("<I", 0xAA1303E0)
         br(0x94000000, "__mantis_strlen")
-        out += struct.pack("<I", 0xAA0003F5)  # mov x21, x0
+        out += struct.pack("<I", 0xAA0003F5)
 
-        # len_b = strlen(b)
-        out += struct.pack("<I", 0xAA1403E0)  # mov x0, x20
+        # len_b
+        out += struct.pack("<I", 0xAA1403E0)
         br(0x94000000, "__mantis_strlen")
-        out += struct.pack("<I", 0xAA0003F6)  # mov x22, x0
+        out += struct.pack("<I", 0xAA0003F6)
 
-        # total = len_a + len_b
-        out += struct.pack("<I", 0x8B1602B5)  # add x21, x21, x22
+        out += struct.pack("<I", 0x8B1602B5) # add x21,x21,x22
 
-        # x2 = total + 1
-        out += struct.pack("<I", 0xAA1503E2)  # mov x2, x21
-        out += struct.pack("<I", 0x91000442)  # add x2, x2, #1
+        out += struct.pack("<I", 0xAA1503E2) # mov x2,x21
+        out += struct.pack("<I", 0x91000442) # add x2,x2,#1
 
-        # Load heap_ptr via literal load
         mark("heap_ptr_adr")
-        out += struct.pack("<I", 0x58000080)  # ldr x0, #imm19 (patch later)
-        heap_ptr_patch = len(out) - 4
+        out += struct.pack("<I", 0x58000080)
+        heap_ptr_patch = len(out)-4
 
-        # ldr x1, [x0]
-        out += struct.pack("<I", 0xF9400001)
-        # cbnz x1, heap_inited
+        out += struct.pack("<I", 0xF9400001) # ldr x1,[x0]
         br(0x35000000, "heap_inited")
 
-        # init heap_ptr = x0 + 8
-        out += struct.pack("<I", 0x91002001)  # add x1, x0, #8
-        out += struct.pack("<I", 0xF9000001)  # str x1, [x0]
+        out += struct.pack("<I", 0x91002001) # add x1,x0,#8
+        out += struct.pack("<I", 0xF9000001) # str x1,[x0]
 
         mark("heap_inited")
 
-        # x3 = result = x1
-        out += struct.pack("<I", 0xAA0103E3)
+        out += struct.pack("<I", 0xAA0103E3) # mov x3,x1
 
-        # bump: x1 += x2
-        out += struct.pack("<I", 0x8B020021)
-        # store new heap_ptr
-        out += struct.pack("<I", 0xF9000001)
+        out += struct.pack("<I", 0x8B020021) # add x1,x1,x2
+        out += struct.pack("<I", 0xF9000001) # str x1,[x0]
 
-        # return ptr in x0
+        out += struct.pack("<I", 0xAA0303E0) # mov x0,x3
+
+        # memcpy(result,a,len_a)
         out += struct.pack("<I", 0xAA0303E0)
-
-        # memcpy(result, a, len_a)
-        out += struct.pack("<I", 0xAA0303E0)  # mov x0, x3
-        out += struct.pack("<I", 0xAA1303E1)  # mov x1, x19
-        out += struct.pack("<I", 0xAA1503E2)  # mov x2, x21
+        out += struct.pack("<I", 0xAA1303E1)
+        out += struct.pack("<I", 0xAA1503E2)
         br(0x94000000, "__mantis_memcpy")
 
-        # memcpy(result + len_a, b, len_b)
-        out += struct.pack("<I", 0x8B150060)  # add x0, x3, x21
-        out += struct.pack("<I", 0xAA1403E1)  # mov x1, x20
-        out += struct.pack("<I", 0xAA1603E2)  # mov x2, x22
+        # memcpy(result+len_a,b,len_b)
+        out += struct.pack("<I", 0x8B150060)
+        out += struct.pack("<I", 0xAA1403E1)
+        out += struct.pack("<I", 0xAA1603E2)
         br(0x94000000, "__mantis_memcpy")
 
-        # null‑terminate
-        out += struct.pack("<I", 0x3900001F)  # strb wzr, [x0]
+        out += struct.pack("<I", 0x3900001F) # strb wzr,[x0]
 
-        # restore x19,x20,x21,x22
-        out += struct.pack("<I", 0xA8C157F5)  # ldp x21,x22,[sp],#16
-        out += struct.pack("<I", 0xA8C14FF3)  # ldp x19,x20,[sp],#16
-
-        out += struct.pack("<I", 0xD65F03C0)  # ret
+        out += struct.pack("<I", 0xA8C157F5)
+        out += struct.pack("<I", 0xA8C14FF3)
+        out += struct.pack("<I", 0xD65F03C0)
 
         # ====================================================
-        # Append heap_ptr + heap
+        # __mantis_format_i64
         # ====================================================
-        heap_ptr_offset = len(out)
-        out += b"\x00" * 8
-        out += b"\x00" * self.heap_size
+        mark("__mantis_format_i64")
 
-        # ====================================================
-        # Patch branches
-        # ====================================================
-        for pos, target, op in fixups:
-            src = pos
-            dst = labels[target]
-            rel = (dst - src) >> 2
-            out[pos:pos+4] = struct.pack(
-                "<I", (op & 0xFC000000) | (rel & 0x03FFFFFF)
-            )
+        out += struct.pack("<I", 0xA9BF0FF3) # stp x19,x20,[sp,#-16]!
+        out += struct.pack("<I", 0xAA0003F3) # mov x19,x0
 
-        # Patch heap_ptr literal load (ldr x0, #imm19)
-        pc = heap_ptr_patch
-        imm19 = (heap_ptr_offset - pc) >> 2
-        out[heap_ptr_patch:heap_ptr_patch+4] = struct.pack(
-            "<I", 0x58000000 | ((imm19 & 0x7FFFF) << 5)
-        )
-
-        return bytes(out)
+        # abs + sign
