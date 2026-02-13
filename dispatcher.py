@@ -6,10 +6,16 @@
 import ctypes
 import struct
 import loader
+import platform
+
+def _is_ios_sandbox() -> bool:
+    m = platform.machine().lower()
+    return m.startswith("ipad") or m.startswith("iphone") or m.startswith("ipod")
 
 # ------------------------------------------------------------
 # Builtin registry
 # ------------------------------------------------------------
+
 
 BUILTINS = {}
 
