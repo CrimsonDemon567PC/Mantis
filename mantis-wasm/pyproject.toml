@@ -1,7 +1,8 @@
 [project]
 name = "mantis"
 version = "1.0.0"
-description = "Mantis compiler and loader"
+description = "Mantis compiler and loader for WebAssembly"
+authors = [{ name = "Vincent Noll" }]
 
 [tool.pyodide]
 packages = ["mantis"]
