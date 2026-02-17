@@ -13,6 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
+    defaults:
+      run:
+        working-directory: mantis-wasm
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -30,29 +34,17 @@ jobs:
       # -----------------------------
       # Ensure pyproject.toml exists
       # -----------------------------
-      - name: Ensure pyproject.toml
-        shell: bash
+      - name: Verify project structure
         run: |
           set -euo pipefail
 
-          if [[ -f pyproject.toml || -f setup.py ]]; then
-            echo "Project metadata exists."
-            exit 0
+          if [[ ! -f pyproject.toml ]]; then
+            echo "pyproject.toml missing in mantis-wasm/" >&2
+            exit 1
           fi
 
-          if [[ -d mantis ]]; then
-            printf '%s\n' \
-              '[project]' \
-              'name = "mantis"' \
-              'version = "0.0.0"' \
-              'description = "Temporary CI pyproject"' \
-              'authors = [{ name = "CI" }]' \
-              '' \
-              '[tool.pyodide]' \
-              'packages = ["mantis"]' \
-              > pyproject.toml
-          else
-            echo "No pyproject.toml/setup.py or mantis/ directory found." >&2
+          if [[ ! -d mantis ]]; then
+            echo "mantis package directory missing." >&2
             exit 1
           fi
 
@@ -98,7 +90,7 @@ jobs:
           wasm-opt --version
 
       # -----------------------------
-      # Build package
+      # Build Pyodide package
       # -----------------------------
       - name: Build Pyodide package
         run: |
@@ -122,5 +114,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mantis-wasm
-          path: dist/
+          path: mantis-wasm/dist/
           retention-days: 7
