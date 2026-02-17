@@ -31,20 +31,26 @@ jobs:
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
 
-          # Extract environment variables from emsdk_env.sh
-          echo "Setting Emscripten environment variables"
-          source ./emsdk_env.sh
+          # Source emsdk_env.sh in a subshell and export all variables
+          {
+            echo "Extracting Emscripten environment"
+            source ./emsdk_env.sh
 
-          # Export all required variables into GitHub Actions environment
-          echo "EMSDK=$EMSDK" >> $GITHUB_ENV
-          echo "EM_CONFIG=$EM_CONFIG" >> $GITHUB_ENV
-          echo "EM_CACHE=$EM_CACHE" >> $GITHUB_ENV
-          echo "EMSDK_NODE=$EMSDK_NODE" >> $GITHUB_ENV
-          echo "PATH=$PATH" >> $GITHUB_ENV
+            echo "EMSDK=$EMSDK"
+            echo "EM_CONFIG=$EM_CONFIG"
+            echo "EM_CACHE=$EM_CACHE"
+            echo "BINARYEN_ROOT=$BINARYEN_ROOT"
+            echo "LLVM_ROOT=$LLVM_ROOT"
+            echo "EMSDK_NODE=$EMSDK_NODE"
+            echo "EMSDK_PYTHON=$EMSDK_PYTHON"
+            echo "PATH=$PATH"
+          } >> $GITHUB_ENV
 
       - name: Verify Emscripten
         run: |
           echo "PATH is: $PATH"
+          which emcc
+          which wasm-opt
           emcc --version
 
       - name: Build Pyodide package
