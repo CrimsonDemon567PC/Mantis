@@ -5,37 +5,47 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install correct wheel version
+      - name: Ensure pip is up to date
+        run: python -m pip install --upgrade pip setuptools
+
+      - name: Pin wheel to compatible version
         run: pip install "wheel<0.41"
 
       - name: Install pyodide-build
         run: pip install pyodide-build
 
-      - name: Install Emscripten SDK
+      - name: Install Emscripten SDK (emsdk 3.1.46)
         run: |
+          set -euo pipefail
           git clone https://github.com/emscripten-core/emsdk.git
           cd emsdk
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
 
-          # Source environment in a subshell and export ONLY KEY=VALUE lines
+          # Source emsdk_env.sh in a subshell to populate variables for this step
+          # then write only KEY=VALUE lines into $GITHUB_ENV (no free text)
           set -a
           source ./emsdk_env.sh
           set +a
 
+          # Export required variables into GitHub Actions environment (KEY=VALUE only)
           echo "EMSDK=$EMSDK" >> $GITHUB_ENV
           echo "EM_CONFIG=$EM_CONFIG" >> $GITHUB_ENV
           echo "EM_CACHE=$EM_CACHE" >> $GITHUB_ENV
@@ -43,19 +53,38 @@ jobs:
           echo "LLVM_ROOT=$LLVM_ROOT" >> $GITHUB_ENV
           echo "EMSDK_NODE=$EMSDK_NODE" >> $GITHUB_ENV
           echo "EMSDK_PYTHON=$EMSDK_PYTHON" >> $GITHUB_ENV
-          echo "PATH=$PATH" >> $GITHUB_ENV
 
-      - name: Verify Emscripten
+          # Ensure both Binaryen and Emscripten directories are first in PATH
+          # Use absolute EMSDK path to avoid ambiguity
+          echo "PATH=$EMSDK/upstream/bin:$EMSDK/upstream/emscripten:$PATH" >> $GITHUB_ENV
+
+      - name: Verify Emscripten and Binaryen are available
         run: |
-          echo "PATH is: $PATH"
-          which emcc
-          which wasm-opt
+          set -euo pipefail
+          echo "PATH: $PATH"
+          which emcc || (echo "emcc not found" && exit 1)
+          which wasm-opt || (echo "wasm-opt not found" && exit 1)
           emcc --version
+          wasm-opt --version
 
       - name: Build Pyodide package
-        run: pyodide build
+        env:
+          # ensure pyodide-build sees the same PATH in this step
+          PATH: ${{ env.PATH }}
+        run: |
+          set -euo pipefail
+          # show a little context for debugging if build fails
+          pyodide --version || true
+          pyodide build
+
+      - name: List dist directory (for debugging)
+        if: always()
+        run: |
+          echo "dist contents:"
+          ls -la dist || echo "dist not present"
 
       - name: Upload WASM artifacts
+        if: success() && steps.build.outcome != 'cancelled'
         uses: actions/upload-artifact@v4
         with:
           name: mantis-wasm
