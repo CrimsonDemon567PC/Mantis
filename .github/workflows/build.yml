@@ -18,6 +18,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install correct wheel version
+        run: pip install "wheel<0.41"
+
       - name: Install pyodide-build
         run: pip install pyodide-build
 
