@@ -13,7 +13,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -24,8 +24,23 @@ jobs:
       - name: Install pyodide-build
         run: pip install pyodide-build
 
+      - name: Install Emscripten SDK
+        run: |
+          git clone https://github.com/emscripten-core/emsdk.git
+          cd emsdk
+          ./emsdk install 3.1.46
+          ./emsdk activate 3.1.46
+          echo "source $(pwd)/emsdk_env.sh" >> $GITHUB_ENV
+
+      - name: Load Emscripten environment
+        run: |
+          source $GITHUB_ENV
+          emcc --version
+
       - name: Build Pyodide package
-        run: pyodide build
+        run: |
+          source $GITHUB_ENV
+          pyodide build
 
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
