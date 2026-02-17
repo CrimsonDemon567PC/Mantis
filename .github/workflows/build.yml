@@ -1,4 +1,4 @@
-name: Build Mantis WASM (robust)
+name: Build Mantis WASM
 
 on:
   push:
@@ -9,35 +9,21 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
-    name: Smoke Test
-    runs-on: ubuntu-latest
-    outputs:
-      smoke_ok: ${{ steps.check.outputs.ok }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Quick environment check
-        id: check
-        run: |
-          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
-          echo "GITHUB_REF=$GITHUB_REF"
-          echo "Runner: $(uname -a)"
-          echo "ok=true" >> "$GITHUB_OUTPUT"
-
   build:
-    name: Install Emscripten and Build Pyodide
     runs-on: ubuntu-latest
-    needs: smoke
-    if: needs.smoke.outputs.smoke_ok == 'true'
     timeout-minutes: 120
 
     steps:
+      # -----------------------------
+      # Checkout
+      # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      # -----------------------------
+      # Python
+      # -----------------------------
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -50,14 +36,16 @@ jobs:
       - name: Install pyodide-build
         run: pip install pyodide-build
 
-      - name: Ensure Python project metadata exists
-        id: ensure_pyproject
+      # -----------------------------
+      # Ensure project metadata
+      # -----------------------------
+      - name: Ensure pyproject.toml exists
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -f pyproject.toml || -f setup.py ]]; then
-            echo "project_file=exists" >> "$GITHUB_OUTPUT"
+            echo "Project metadata found."
             exit 0
           fi
 
@@ -66,25 +54,29 @@ jobs:
 [project]
 name = "mantis"
 version = "0.0.0"
-description = "Temporary pyproject for CI pyodide build"
+description = "Temporary CI pyproject"
 authors = [{ name = "CI" }]
 
 [tool.pyodide]
 packages = ["mantis"]
 PYPROJECT
-            echo "project_file=created" >> "$GITHUB_OUTPUT"
           else
-            echo "No pyproject.toml/setup.py and no mantis/ directory found." >&2
+            echo "No Python project metadata or mantis/ directory found." >&2
             exit 1
           fi
 
-      # Cache emsdk to speed up builds
+      # -----------------------------
+      # Cache emsdk
+      # -----------------------------
       - name: Cache emsdk
         uses: actions/cache@v4
         with:
           path: emsdk
           key: emsdk-3.1.46
 
+      # -----------------------------
+      # Install Emscripten
+      # -----------------------------
       - name: Install Emscripten SDK
         shell: bash
         run: |
@@ -98,10 +90,14 @@ PYPROJECT
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
 
-          # Persist environment for next steps
-          echo "EMSDK=$PWD" >> "$GITHUB_ENV"
-          echo "PATH=$PWD/upstream/bin:$PWD/upstream/emscripten:$PATH" >> "$GITHUB_ENV"
+          EMSDK_PATH="$PWD"
 
+          echo "EMSDK=$EMSDK_PATH" >> "$GITHUB_ENV"
+          echo "PATH=$EMSDK_PATH/upstream/bin:$EMSDK_PATH/upstream/emscripten:${PATH}" >> "$GITHUB_ENV"
+
+      # -----------------------------
+      # Verify toolchain
+      # -----------------------------
       - name: Verify Emscripten
         shell: bash
         run: |
@@ -111,20 +107,29 @@ PYPROJECT
           emcc --version
           wasm-opt --version
 
-      - name: Build Pyodide package
+      # -----------------------------
+      # Build Pyodide package
+      # -----------------------------
+      - name: Build package
         shell: bash
         run: |
           set -euo pipefail
           pyodide --version || true
           pyodide build .
 
-      - name: Show dist contents
+      # -----------------------------
+      # Debug dist
+      # -----------------------------
+      - name: Show dist directory
         if: always()
         run: |
-          echo "=== dist directory ==="
-          ls -la dist || echo "dist not present"
+          echo "=== dist ==="
+          ls -la dist || echo "dist not found"
 
-      - name: Upload WASM artifacts
+      # -----------------------------
+      # Upload artifact
+      # -----------------------------
+      - name: Upload WASM artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
