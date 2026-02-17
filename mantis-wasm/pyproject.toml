@@ -5,7 +5,7 @@ description = "Mantis compiler and loader for WebAssembly"
 authors = [{ name = "Vincent Noll" }]
 
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.pyodide]
