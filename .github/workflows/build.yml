@@ -30,17 +30,25 @@ jobs:
           cd emsdk
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
-          echo "source $(pwd)/emsdk_env.sh" >> $GITHUB_ENV
 
-      - name: Load Emscripten environment
+          # Extract environment variables from emsdk_env.sh
+          echo "Setting Emscripten environment variables"
+          source ./emsdk_env.sh
+
+          # Export all required variables into GitHub Actions environment
+          echo "EMSDK=$EMSDK" >> $GITHUB_ENV
+          echo "EM_CONFIG=$EM_CONFIG" >> $GITHUB_ENV
+          echo "EM_CACHE=$EM_CACHE" >> $GITHUB_ENV
+          echo "EMSDK_NODE=$EMSDK_NODE" >> $GITHUB_ENV
+          echo "PATH=$PATH" >> $GITHUB_ENV
+
+      - name: Verify Emscripten
         run: |
-          source $GITHUB_ENV
+          echo "PATH is: $PATH"
           emcc --version
 
       - name: Build Pyodide package
-        run: |
-          source $GITHUB_ENV
-          pyodide build
+        run: pyodide build
 
       - name: Upload WASM artifacts
         uses: actions/upload-artifact@v4
