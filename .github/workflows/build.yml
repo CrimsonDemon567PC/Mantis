@@ -24,10 +24,6 @@ jobs:
           echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
           echo "GITHUB_REF=$GITHUB_REF"
           echo "Runner: $(uname -a)"
-          # basic sanity: ensure repo has at least one file and workflows dir exists
-          if [ ! -d .github/workflows ]; then
-            echo "workflows_missing=false" >> $GITHUB_OUTPUT
-          fi
           echo "ok=true" >> $GITHUB_OUTPUT
 
   build:
@@ -92,7 +88,6 @@ PYPROJECT
           set -u
 
           # Export required variables into GitHub Actions environment (KEY=VALUE only).
-          # Use parameter expansion with defaults to avoid unbound variable errors.
           echo "EMSDK=${EMSDK:-}" >> $GITHUB_ENV
           echo "EM_CONFIG=${EM_CONFIG:-}" >> $GITHUB_ENV
           echo "EM_CACHE=${EM_CACHE:-}" >> $GITHUB_ENV
@@ -134,7 +129,7 @@ PYPROJECT
           ls -la dist || echo "dist not present"
 
       - name: Upload WASM artifacts
-        if: success() && (always())
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: mantis-wasm
