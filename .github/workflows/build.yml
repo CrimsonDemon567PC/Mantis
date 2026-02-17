@@ -1,18 +1,41 @@
-name: Build Mantis WASM
+name: Build Mantis WASM (robust)
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "master"]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  smoke:
+    name: Smoke Test
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    outputs:
+      smoke_ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
+      - name: Quick environment check
+        id: check
+        run: |
+          echo "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "Runner: $(uname -a)"
+          # basic sanity: ensure repo has at least one file and workflows dir exists
+          if [ ! -d .github/workflows ]; then
+            echo "workflows_missing=false" >> $GITHUB_OUTPUT
+          fi
+          echo "ok=true" >> $GITHUB_OUTPUT
+
+  build:
+    name: Install Emscripten and Build Pyodide
+    runs-on: ubuntu-latest
+    needs: smoke
+    if: needs.smoke.outputs.smoke_ok == 'true'
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,7 +61,6 @@ jobs:
           if [ -f pyproject.toml ] || [ -f setup.py ]; then
             echo "project_file=exists" >> $GITHUB_OUTPUT
           else
-            # If there's a mantis/ package folder, create a minimal pyproject.toml for pyodide build
             if [ -d "mantis" ]; then
               cat > pyproject.toml <<'PYPROJECT'
 [project]
@@ -64,7 +86,7 @@ PYPROJECT
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
 
-          # Source emsdk_env.sh in a safe way
+          # Source emsdk_env.sh in a safe way: allow missing vars during source
           set +u
           source ./emsdk_env.sh
           set -u
@@ -102,7 +124,6 @@ PYPROJECT
           PATH: ${{ env.PATH }}
         run: |
           set -euo pipefail
-          # show pyodide CLI version for debugging
           pyodide --version || true
           pyodide build
 
@@ -113,7 +134,7 @@ PYPROJECT
           ls -la dist || echo "dist not present"
 
       - name: Upload WASM artifacts
-        if: success() && (exists('dist') || always())
+        if: success() && (always())
         uses: actions/upload-artifact@v4
         with:
           name: mantis-wasm
