@@ -31,24 +31,45 @@ jobs:
       - name: Install pyodide-build
         run: pip install pyodide-build
 
+      - name: Ensure Python project metadata exists (create minimal pyproject.toml if missing)
+        id: ensure_pyproject
+        run: |
+          set -euo pipefail
+          if [ -f pyproject.toml ] || [ -f setup.py ]; then
+            echo "project_file=exists" >> $GITHUB_OUTPUT
+          else
+            # If there's a mantis/ package folder, create a minimal pyproject.toml for pyodide build
+            if [ -d "mantis" ]; then
+              cat > pyproject.toml <<'PYPROJECT'
+[project]
+name = "mantis"
+version = "0.0.0"
+description = "Temporary pyproject for CI pyodide build"
+authors = [{ name = "CI" }]
+[tool.pyodide]
+packages = ["mantis"]
+PYPROJECT
+              echo "project_file=created" >> $GITHUB_OUTPUT
+            else
+              echo "No pyproject.toml or setup.py and no mantis/ directory found. Aborting." >&2
+              exit 1
+            fi
+          fi
+
       - name: Install Emscripten SDK (emsdk 3.1.46)
         run: |
           set -euo pipefail
-
-          # Clone and install the requested emsdk release
           git clone https://github.com/emscripten-core/emsdk.git
           cd emsdk
           ./emsdk install 3.1.46
           ./emsdk activate 3.1.46
 
-          # Source emsdk_env.sh in a safe way:
-          # - temporarily disable nounset so sourcing won't fail if some vars are absent
-          # - then export only KEY=VALUE lines into $GITHUB_ENV (no free text)
+          # Source emsdk_env.sh in a safe way (avoid unbound variable errors)
           set +u
           source ./emsdk_env.sh
           set -u
 
-          # Write required variables into GitHub Actions environment (KEY=VALUE only).
+          # Export required variables into GitHub Actions environment (KEY=VALUE only).
           # Use parameter expansion with defaults to avoid unbound variable errors.
           echo "EMSDK=${EMSDK:-}" >> $GITHUB_ENV
           echo "EM_CONFIG=${EM_CONFIG:-}" >> $GITHUB_ENV
@@ -58,8 +79,7 @@ jobs:
           echo "EMSDK_NODE=${EMSDK_NODE:-}" >> $GITHUB_ENV
           echo "EMSDK_PYTHON=${EMSDK_PYTHON:-}" >> $GITHUB_ENV
 
-          # CRITICAL: ensure both Binaryen and Emscripten directories are first in PATH
-          # Use absolute EMSDK path to avoid ambiguity
+          # Ensure both Binaryen and Emscripten directories are first in PATH
           echo "PATH=${EMSDK:-}/upstream/bin:${EMSDK:-}/upstream/emscripten:$PATH" >> $GITHUB_ENV
 
       - name: Verify Emscripten and Binaryen are available
@@ -67,11 +87,11 @@ jobs:
           set -euo pipefail
           echo "PATH: $PATH"
           if ! command -v emcc >/dev/null 2>&1; then
-            echo "emcc not found in PATH"
+            echo "emcc not found in PATH" >&2
             exit 1
           fi
           if ! command -v wasm-opt >/dev/null 2>&1; then
-            echo "wasm-opt (Binaryen) not found in PATH"
+            echo "wasm-opt (Binaryen) not found in PATH" >&2
             exit 1
           fi
           emcc --version
@@ -79,22 +99,21 @@ jobs:
 
       - name: Build Pyodide package
         env:
-          # ensure pyodide-build sees the same PATH in this step
           PATH: ${{ env.PATH }}
         run: |
           set -euo pipefail
-          # show pyodide CLI version for debugging (optional)
+          # show pyodide CLI version for debugging
           pyodide --version || true
           pyodide build
 
-      - name: List dist directory for debugging
+      - name: Show dist contents (debug)
         if: always()
         run: |
-          echo "dist contents:"
+          echo "=== dist directory ==="
           ls -la dist || echo "dist not present"
 
       - name: Upload WASM artifacts
-        if: success()
+        if: success() && (exists('dist') || always())
         uses: actions/upload-artifact@v4
         with:
           name: mantis-wasm
