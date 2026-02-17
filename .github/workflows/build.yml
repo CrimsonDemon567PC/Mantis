@@ -14,54 +14,45 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # -----------------------------
-      # Checkout
-      # -----------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # -----------------------------
-      # Python
-      # -----------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Upgrade pip tooling
+      - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip setuptools
-          pip install "wheel<0.41"
-
-      - name: Install pyodide-build
-        run: pip install pyodide-build
+          pip install "wheel<0.41" pyodide-build
 
       # -----------------------------
-      # Ensure project metadata
+      # Ensure pyproject.toml exists
       # -----------------------------
-      - name: Ensure pyproject.toml exists
+      - name: Ensure pyproject.toml
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -f pyproject.toml || -f setup.py ]]; then
-            echo "Project metadata found."
+            echo "Project metadata exists."
             exit 0
           fi
 
           if [[ -d mantis ]]; then
-            cat > pyproject.toml <<'PYPROJECT'
-[project]
-name = "mantis"
-version = "0.0.0"
-description = "Temporary CI pyproject"
-authors = [{ name = "CI" }]
-
-[tool.pyodide]
-packages = ["mantis"]
-PYPROJECT
+            printf '%s\n' \
+              '[project]' \
+              'name = "mantis"' \
+              'version = "0.0.0"' \
+              'description = "Temporary CI pyproject"' \
+              'authors = [{ name = "CI" }]' \
+              '' \
+              '[tool.pyodide]' \
+              'packages = ["mantis"]' \
+              > pyproject.toml
           else
-            echo "No Python project metadata or mantis/ directory found." >&2
+            echo "No pyproject.toml/setup.py or mantis/ directory found." >&2
             exit 1
           fi
 
@@ -99,7 +90,6 @@ PYPROJECT
       # Verify toolchain
       # -----------------------------
       - name: Verify Emscripten
-        shell: bash
         run: |
           set -euo pipefail
           command -v emcc
@@ -108,19 +98,17 @@ PYPROJECT
           wasm-opt --version
 
       # -----------------------------
-      # Build Pyodide package
+      # Build package
       # -----------------------------
-      - name: Build package
-        shell: bash
+      - name: Build Pyodide package
         run: |
           set -euo pipefail
-          pyodide --version || true
           pyodide build .
 
       # -----------------------------
       # Debug dist
       # -----------------------------
-      - name: Show dist directory
+      - name: Show dist
         if: always()
         run: |
           echo "=== dist ==="
