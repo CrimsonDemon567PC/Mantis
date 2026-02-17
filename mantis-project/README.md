@@ -1,0 +1,226 @@
+Mantis 7 — README
+Deterministic Native Compiler + Runtime + Loader
+===========================
+
+Mantis 7 is a minimal, deterministic, zero‑copy compiler toolchain.
+It takes Mantis source code (.mt), compiles it into portable bytecode
+(.mtn), translates that bytecode into native machine code (x86‑64 or
+ARM64), embeds a position‑independent string runtime, and executes it
+directly from RWX memory.
+
+The entire pipeline is designed to be:
+- deterministic
+- architecture‑aware
+- zero‑copy
+- allocation‑safe
+- fully native (no interpreter fallback)
+- minimal and transparent
+
+
+## 1. Architecture Overview
+
+Mantis 7 consists of four major components:
+
+### 1. Compiler (compiler.py)
+   - Parses .mt source files
+   - Emits MTN1 bytecode (portable ISA)
+   - Embeds a string‑blob table for literals
+
+### 2. Backends (backend_x64.py / backend_arm64.py)
+   - Translate MTN1 bytecode → native machine code
+   - Map builtin calls (-2 = concat, -3 = to_string) to runtime offsets
+   - Produce a pure native function with correct calling convention
+
+### 3. String Runtime (string_runtime.py)
+   - Fully position‑independent machine‑code blob
+   - Contains:
+       __mantis_strlen
+       __mantis_memcpy
+       __mantis_string_concat
+       __mantis_format_i64
+   - Provides a bump‑allocated heap for string operations
+   - build() returns (blob, offsets)
+
+### 4. Loader (loader.py)
+   - Loads .mtn or .mtnb bundles
+   - Extracts string blob for dispatcher
+   - Builds runtime blob + offsets
+   - Calls backend with offsets
+   - Appends runtime to native code
+   - Executes the result directly from RWX memory
+
+
+## 2. File Types
+
+.mt      — Mantis source file  
+.mtn     — Single‑module bytecode file  
+.mtnb    — Multi‑module bundle (MTNB format)  
+          Contains modules + assets + offsets
+
+
+## 3. Bytecode Format (MTN1)
+
+Header:
+```
+    [magic "MTN1"]
+    [fn_count u32]
+    For each function:
+        [code_len u32]
+        code_len × instruction:
+            [op u8][a i32][b i32][c i32]
+    [string_blob_size u32]
+    [string_blob raw bytes]
+```
+Instruction size: 13 bytes  
+All integers: little‑endian  
+All strings: UTF‑8, null‑terminated in runtime
+
+
+## 4. Builtin Calls
+
+The compiler emits negative function indices for builtins:
+```
+-1  → print(...)          (not yet mapped natively)
+-2  → concat(a, b)        → __mantis_string_concat
+-3  → to_string(i64)      → __mantis_format_i64
+```
+Backends resolve these using runtime offsets provided by build().
+
+
+## 5. Native Execution Model
+
+The loader:
+
+1. Reads bytecode
+2. Extracts string blob for dispatcher
+3. Builds runtime blob + offset table
+4. Calls backend:
+      - emit_x64(bytecode, rt_offsets)
+      - emit_arm64(bytecode, rt_offsets)
+5. Appends runtime blob to native code
+6. Allocates RWX memory
+7. Copies native code into executable memory
+8. Calls the entry function as:
+       int64_t entry(void)
+
+
+## 6. CLI Usage
+
+The CLI entry point is:
+```
+    python cli.py {run|bench|build} {file.mt|project/}
+```
+Commands:
+
+```
+run
+```
+Compiles and immediately executes a single `.mt` file or a project.
+
+Examples:
+```
+    python cli.py run hello.mt
+    python cli.py run project/
+```
+Behavior:
+- Compiles source → .mtn
+- Loads .mtn via loader
+- Executes native code
+- Prints return value
+
+
+```
+bench
+```
+Runs a benchmark loop over the compiled program.
+
+Examples:
+
+    python cli.py bench fib.mt
+    python cli.py bench project/
+
+Behavior:
+- Compiles once
+- Executes N times (configurable)
+- Prints timing statistics
+
+
+```
+build
+```
+Compiles a file or project into a standalone .mtn or .mtnb bundle.
+
+Examples:
+
+    python cli.py build hello.mt
+    python cli.py build project/
+
+Behavior:
+- Produces .mtn for single file
+- Produces .mtnb for multi‑module project
+- Does NOT execute the result
+
+
+## 7. Runtime Functions
+
+```Python
+__mantis_strlen(rdi)
+#    Returns length of null‑terminated string.
+
+__mantis_memcpy(rdi, rsi, rdx)
+#    Copies rdx bytes from rsi → rdi.
+#    Returns rdi.
+
+__mantis_string_concat(a, b)
+#    Allocates new buffer from bump heap.
+#    Copies a, then b.
+#    Null‑terminates.
+#    Returns pointer.
+
+__mantis_format_i64(value)
+#    Converts signed 64‑bit integer to ASCII.
+#    Writes digits in reverse, handles sign, null‑terminates.
+#    Returns pointer.
+```
+
+## 8. Determinism Guarantees
+
+- No dynamic dispatch
+- No reflection
+- No GC
+- No OS‑dependent behavior
+- No heap fragmentation (bump allocator only)
+- All code generation is pure and reproducible
+- All runtime functions are pure machine code with fixed offsets
+
+
+## 9. Supported Architectures
+
+x86‑64 (System V ABI)
+ARM64 (AArch64, Linux / macOS / iOS)
+
+
+10. Example
+
+hello.mt:
+
+    x = 41
+    print("Result: {x + 1}")
+
+CLI:
+
+    python cli.py run hello.mt
+
+Output:
+
+    Result: 42
+
+
+## 11. License
+
+MIT
+
+## 12 Package Index
+[Mantis Package Index](https://mantispi.page.gd)
+Note: Uploaded files are renamed to bin, rename and extract to use and please try to upload only zip files, if it is possible for your purpose.
+# END OF README

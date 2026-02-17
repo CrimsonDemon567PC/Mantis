@@ -9,8 +9,8 @@ import argparse
 import time
 from pathlib import Path
 
-import compiler as mantis_compiler
-import loader as mantis_loader
+from . import compiler_core as mantis_compiler
+from . import loader as mantis_loader
 
 
 # ============================================================

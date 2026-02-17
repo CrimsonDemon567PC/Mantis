@@ -1,4 +1,3 @@
-# mantis/__init__.py
+from .cli import main
 
-from .compiler import compile_source
-from .loader import run, run_bytes
+__all__ = ["main"]

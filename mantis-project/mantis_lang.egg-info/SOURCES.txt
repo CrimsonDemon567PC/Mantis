@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+setup.py
+mantis/__init__.py
+mantis/backend_arm64.py
+mantis/backend_x64.py
+mantis/cli.py
+mantis/compiler_core.py
+mantis/dispatcher.py
+mantis/linear_scan_allocator.py
+mantis/loader.py
+mantis/string_runtime.py
+mantis_lang.egg-info/PKG-INFO
+mantis_lang.egg-info/SOURCES.txt
+mantis_lang.egg-info/dependency_links.txt
+mantis_lang.egg-info/entry_points.txt
+mantis_lang.egg-info/top_level.txt

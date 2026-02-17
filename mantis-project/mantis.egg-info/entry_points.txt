@@ -1,0 +1,2 @@
+[console_scripts]
+mantis = mantis.cli:main

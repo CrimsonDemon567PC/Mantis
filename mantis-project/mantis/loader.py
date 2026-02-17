@@ -12,9 +12,9 @@ import ctypes
 import struct
 import platform
 
-from backend_x64 import emit_x64
-from backend_arm64 import emit_arm64
-from string_runtime import StringRuntimeX64, StringRuntimeARM64
+from .backend_x64 import emit_x64
+from .backend_arm64 import emit_arm64
+from .string_runtime import StringRuntimeX64, StringRuntimeARM64
 
 
 def _extract_string_blob(bytecode: memoryview) -> bytes:
