@@ -1,0 +1,31 @@
+name: Build Mantis WASM
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install pyodide-build
+        run: pip install pyodide-build
+
+      - name: Build Pyodide package
+        run: pyodide build
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: mantis-wasm
+          path: dist/
