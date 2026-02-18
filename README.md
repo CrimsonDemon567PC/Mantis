@@ -8,6 +8,8 @@ It takes Mantis source code (.mt), compiles it into portable bytecode
 ARM64), embeds a position‑independent string runtime, and executes it
 directly from RWX memory.
 
+![](IMG_0713.png)
+
 The entire pipeline is designed to be:
 - deterministic
 - architecture‑aware
