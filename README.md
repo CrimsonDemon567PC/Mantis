@@ -220,7 +220,7 @@ ARM64 (AArch64, Linux / macOS / iOS)
 hello.mt:
 
     x = 41
-    print("Result: {x + 1}")
+    print(f"Result: {x + 1}")
 
 CLI:
 
