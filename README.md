@@ -230,6 +230,10 @@ Output:
 
     Result: 42
 
+## PyPI Installation
+```
+pip install mantis-lang
+```
 
 ## 11. License
 
