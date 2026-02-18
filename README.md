@@ -1,9 +1,13 @@
+<p align="center">
+  <img src="IMG_0713.png" alt="Mantis 7 Logo" width="300">
+</p>
+
 # 🦎 Mantis 7
 > **Deterministic Native Compiler + Runtime + Loader**
 
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 ![Architecture: x64/ARM64](https://img.shields.io/badge/Architecture-x64%20%7C%20ARM64-blue.svg)
-![Stage: Production-Ready](https://img.shields.io/badge/Stage-Native%20JIT-green.svg)
+![Stage: Native JIT](https://img.shields.io/badge/Stage-Native%20JIT-green.svg)
 
 ---
 ```Mantis
@@ -18,8 +22,6 @@ It takes Mantis source code (.mt), compiles it into portable bytecode
 (.mtn), translates that bytecode into native machine code (x86‑64 or
 ARM64), embeds a position‑independent string runtime, and executes it
 directly from RWX memory.
-
-![](IMG_0713.png)
 
 The entire pipeline is designed to be:
 - deterministic
