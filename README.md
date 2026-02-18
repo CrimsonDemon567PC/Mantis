@@ -1,6 +1,17 @@
-Mantis 7 — README
-Deterministic Native Compiler + Runtime + Loader
-===========================
+# 🦎 Mantis 7
+> **Deterministic Native Compiler + Runtime + Loader**
+
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![Architecture: x64/ARM64](https://img.shields.io/badge/Architecture-x64%20%7C%20ARM64-blue.svg)
+![Stage: Production-Ready](https://img.shields.io/badge/Stage-Native%20JIT-green.svg)
+
+---
+```Mantis
+def main():
+    x = 2
+    y = 3
+    print("Hello from Mantis")
+```
 
 Mantis 7 is a minimal, deterministic, zero‑copy compiler toolchain.
 It takes Mantis source code (.mt), compiles it into portable bytecode
